@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+sqlalchemy
+asyncpg
+pydantic
+argon2-cffi
+passlib
+python-jose
+python-multipart
+pytesseract
+Pillow
+aiofiles
+pyotp
