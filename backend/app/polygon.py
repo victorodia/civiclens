@@ -16,6 +16,12 @@ STATUS_TIMEOUT = 8      # seconds, for the live dashboard balance probe
 class InsufficientGasError(Exception):
     pass
 
+# Public RPCs reject (403) the default python/web3 User-Agent and then only
+# answer after long retry backoffs. A plain UA gets answers in ~0.2s.
+PROVIDER_KWARGS = {
+    "headers": {"User-Agent": "CivicLens-Anchor/1.0"},
+}
+
 def sync_anchor_hash(document_hash_hex: str) -> str:
     """
     Synchronously sends a 0-value transaction to the Polygon network with the hash in the data payload.
@@ -24,7 +30,7 @@ def sync_anchor_hash(document_hash_hex: str) -> str:
     if not PRIVATE_KEY:
         raise InsufficientGasError("Server wallet is not configured.")
 
-    web3 = Web3(Web3.HTTPProvider(RPC_URL, request_kwargs={"timeout": ANCHOR_TIMEOUT}))
+    web3 = Web3(Web3.HTTPProvider(RPC_URL, request_kwargs={"timeout": ANCHOR_TIMEOUT, **PROVIDER_KWARGS}))
     account = Account.from_key(PRIVATE_KEY)
     balance = web3.eth.get_balance(account.address)
     if balance == 0:
@@ -58,7 +64,7 @@ def get_wallet_status():
     if not PRIVATE_KEY:
         return {"address": None, "balance": 0.0}
     try:
-        web3 = Web3(Web3.HTTPProvider(RPC_URL, request_kwargs={"timeout": STATUS_TIMEOUT}))
+        web3 = Web3(Web3.HTTPProvider(RPC_URL, request_kwargs={"timeout": STATUS_TIMEOUT, **PROVIDER_KWARGS}))
         account = Account.from_key(PRIVATE_KEY)
         balance_wei = web3.eth.get_balance(account.address)
         balance_pol = float(web3.from_wei(balance_wei, 'ether'))
