@@ -6,8 +6,12 @@ from eth_account import Account
 
 load_dotenv()
 
-RPC_URL = os.environ.get("POLYGON_RPC_URL", "https://polygon-rpc.com")
+RPC_URL = os.environ.get("POLYGON_RPC_URL", "https://polygon-bor-rpc.publicnode.com")
 PRIVATE_KEY = os.environ.get("POLYGON_PRIVATE_KEY")
+
+# Hard timeouts: a hanging public RPC must never kill a gunicorn worker.
+ANCHOR_TIMEOUT = 20     # seconds, for the background anchoring task
+STATUS_TIMEOUT = 8      # seconds, for the live dashboard balance probe
 
 class InsufficientGasError(Exception):
     pass
@@ -20,10 +24,8 @@ def sync_anchor_hash(document_hash_hex: str) -> str:
     if not PRIVATE_KEY:
         raise InsufficientGasError("Server wallet is not configured.")
 
-    web3 = Web3(Web3.HTTPProvider(RPC_URL))
+    web3 = Web3(Web3.HTTPProvider(RPC_URL, request_kwargs={"timeout": ANCHOR_TIMEOUT}))
     account = Account.from_key(PRIVATE_KEY)
-
-    # Check balance
     balance = web3.eth.get_balance(account.address)
     if balance == 0:
         raise InsufficientGasError("Server wallet has 0 MATIC/POL. Cannot pay gas.")
@@ -55,11 +57,16 @@ async def anchor_hash_async(document_hash_hex: str) -> str:
 def get_wallet_status():
     if not PRIVATE_KEY:
         return {"address": None, "balance": 0.0}
-    web3 = Web3(Web3.HTTPProvider(RPC_URL))
-    account = Account.from_key(PRIVATE_KEY)
     try:
+        web3 = Web3(Web3.HTTPProvider(RPC_URL, request_kwargs={"timeout": STATUS_TIMEOUT}))
+        account = Account.from_key(PRIVATE_KEY)
         balance_wei = web3.eth.get_balance(account.address)
         balance_pol = float(web3.from_wei(balance_wei, 'ether'))
         return {"address": account.address, "balance": balance_pol}
-    except:
-        return {"address": account.address, "balance": 0.0}
+    except Exception:
+        # RPC unreachable/misbehaving — never hang the dashboard worker.
+        try:
+            address = Account.from_key(PRIVATE_KEY).address
+        except Exception:
+            address = None
+        return {"address": address, "balance": 0.0, "rpc": "unreachable"}
