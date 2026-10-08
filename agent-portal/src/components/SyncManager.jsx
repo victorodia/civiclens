@@ -123,15 +123,24 @@ const SyncManager = ({ assignedPu }) => {
                     longitude: draft.location?.lng
                 };
 
+                const token = localStorage.getItem('cl_access_token');
                 const submitResponse = await fetch('/results/submit', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Device-Fingerprint': 'MOCKED_PHONE_ID',
+                        ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+                    },
                     body: JSON.stringify(resultPayload)
                 });
 
                 if (!submitResponse.ok) {
                     const errorData = await submitResponse.json();
                     console.error("Submission failed:", errorData);
+                    if (submitResponse.status === 401) {
+                        // Token expired or revoked: force re-authentication on next sync
+                        localStorage.removeItem('cl_access_token');
+                    }
                     throw new Error(errorData.detail || "Result submission failed");
                 }
 

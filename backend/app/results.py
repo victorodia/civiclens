@@ -1,7 +1,7 @@
 import asyncio
 import hashlib
 import json
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
@@ -10,8 +10,25 @@ from typing import Optional
 
 from .db import get_db, AsyncSessionLocal
 from .models import Result, PollingUnit, User
+from .security import get_current_user, check_user_status, verify_payload_signature, log_audit
 
 router = APIRouter(prefix="/results", tags=["Result Collation"])
+
+
+async def _token_claims(authorization: Optional[str] = Header(None)) -> dict:
+    """
+    Decode the raw JWT claims. Used to surface the silent duress flag that
+    login embeds in the token when an agent authenticates under coercion.
+    """
+    from .security import SECRET_KEY, ALGORITHM
+    from jose import jwt as jose_jwt
+    if not authorization:
+        return {}
+    try:
+        token = authorization.replace("Bearer ", "")
+        return jose_jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except Exception:
+        return {}
 
 
 def compute_result_hash(payload: "ResultSubmitSchema") -> str:
@@ -83,21 +100,26 @@ class ResultSubmitSchema(BaseModel):
     signed_timestamp: Optional[str] = None
 
 @router.post("/submit")
-async def submit_election_result(payload: ResultSubmitSchema, db: AsyncSession = Depends(get_db)):
+async def submit_election_result(
+    payload: ResultSubmitSchema,
+    db: AsyncSession = Depends(get_db),
+    agent: User = Depends(get_current_user),
+    claims: dict = Depends(_token_claims),
+    x_device_fingerprint: Optional[str] = Header(None),
+):
     """
     Submits a final result from an agent.
-    Checks for PU existence and prevents double-submissions (WORM logic).
-    Enforces payload integrity via HMAC signature verification.
+    Requires a valid agent JWT; the submitter is the JWT identity, never the
+    payload. Enforces device binding, PU accreditation, and WORM immutability.
     """
-    from .security import verify_payload_signature
-    
+
     # 0. Signature Verification (Non-Repudiation Check)
     # The signature is generated from: puCode|partyAVotes|partyBVotes|partyCVotes
     payload_string = f"{payload.pu_code}|{payload.party_a_votes}|{payload.party_b_votes}|{payload.party_c_votes}"
-    
+
     if not payload.signature:
         print(f"[SECURITY ALERT] Unsigned submission attempt for PU {payload.pu_code}")
-        # In a strict military-grade production, we'd raise 403. 
+        # In a strict military-grade production, we'd raise 403.
         # For this transition phase, we'll log it but proceed if the agent exists.
         # UNCOMMENT THE BELOW LINE TO ENFORCE RIGID SIGNING
         # raise HTTPException(status_code=403, detail="Payload Integrity Error: Missing Digital Signature.")
@@ -106,32 +128,42 @@ async def submit_election_result(payload: ResultSubmitSchema, db: AsyncSession =
         if not is_valid:
             print(f"[SECURITY ALERT] TAMPERING DETECTED: Signature mismatch for PU {payload.pu_code}")
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN, 
+                status_code=status.HTTP_403_FORBIDDEN,
                 detail="Payload Integrity Error: Digital Signature Mismatch. Data may have been tampered with."
             )
         print(f"[SECURITY] Signature Verified for PU {payload.pu_code}")
-    
+
     # 1. Resolve PU
     pu_res = await db.execute(select(PollingUnit).where(PollingUnit.pu_code == payload.pu_code))
     pu = pu_res.scalar_one_or_none()
     if not pu:
         raise HTTPException(status_code=404, detail=f"Polling Unit {payload.pu_code} not found in registry.")
 
-    # 2. Resolve Agent
-    agent_res = await db.execute(select(User).where(User.email == payload.agent_email))
-    agent = agent_res.scalar_one_or_none()
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent profile not found.")
-
-    # 2.5 Security Enforcement: Remote Kill-Switch & Field Authorization
-    from .security import check_user_status
-    # In a real scenario, we'd extract the device fingerprint from headers or JWT
-    # For now, we use the one passed in if available, or fall back to checking is_active
-    is_authorized = await check_user_status(str(agent.id), agent.device_fingerprint, db)
-    if not is_authorized:
+    # 2. Authenticated Identity: the agent is whoever the JWT belongs to.
+    if agent.role != "agent":
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, 
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only provisioned field agents may submit results."
+        )
+    if payload.agent_email and payload.agent_email.lower() != agent.email.lower():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Payload identity does not match the authenticated agent."
+        )
+
+    # 2.5 Kill-Switch & Device Binding: the fingerprint must come from the
+    # request header and match the device registered at provisioning time.
+    if not await check_user_status(str(agent.id), x_device_fingerprint, db):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
             detail="Access Denied: Agent account is inactive or device is unauthorized."
+        )
+
+    # 2.6 Accreditation: an agent may only collate results for their own PU.
+    if not agent.assigned_pu_id or agent.assigned_pu_id != pu.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not the accredited agent for this polling unit."
         )
 
     # 3. Check if result already exists for this PU
@@ -191,17 +223,23 @@ async def submit_election_result(payload: ResultSubmitSchema, db: AsyncSession =
         blockchain_hash=result_hash
     )
 
-    from .security import log_audit
-    
+    # 4.6 Duress: if the login JWT carried the silent duress flag, the
+    # submission is accepted (so the coercer sees no error) but permanently
+    # marked compromised for the situation room.
+    is_under_duress = bool(claims.get("duress_flag"))
+    if is_under_duress:
+        new_result.is_compromised = True
+        print(f"[SECURITY] Duress-flagged submission recorded for PU {payload.pu_code}")
+
     db.add(new_result)
-    
+
     # 5. Audit Logging (WORM Compliance)
     await log_audit(
-        db, 
-        actor_id=agent.id, 
-        action="RESULT_SUBMISSION", 
-        target_id=new_result.id, 
-        details=f"Result committed for PU {payload.pu_code}. Flagged={is_flagged}"
+        db,
+        actor_id=agent.id,
+        action="RESULT_SUBMISSION",
+        target_id=new_result.id,
+        details=f"Result committed for PU {payload.pu_code}. Flagged={is_flagged}. Duress={is_under_duress}"
     )
 
     await db.commit()
