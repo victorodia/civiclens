@@ -36,7 +36,7 @@ const NotificationBanner = () => {
                     initial={{ opacity: 0, y: -100 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -100 }}
-                    className="fixed top-0 left-0 right-0 z-[100] flex justify-center p-4 pointer-events-none"
+                    className="fixed top-0 left-0 right-0 z-[10000] flex justify-center p-4 pointer-events-none"
                 >
                     <div className={`${currentStyle.bg} pointer-events-auto shadow-2xl rounded-2xl flex items-center p-4 min-w-[300px] max-w-md border border-white/10 backdrop-blur-md bg-opacity-90`}>
                         <div className="mr-3">

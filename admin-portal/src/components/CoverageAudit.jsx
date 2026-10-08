@@ -3,7 +3,7 @@ import { AlertTriangle, MapPin, Search, RefreshCw, Filter, UserPlus, Shield } fr
 import { motion } from 'framer-motion';
 import { useNotification } from '../contexts/NotificationContext';
 
-const CoverageAudit = () => {
+const CoverageAudit = ({ setActiveView }) => {
     const { showNotification } = useNotification();
     const [gaps, setGaps] = useState([]);
     const [totalGaps, setTotalGaps] = useState(0);
@@ -26,7 +26,7 @@ const CoverageAudit = () => {
 
     const fetchStates = async () => {
         try {
-            const res = await fetch('http://127.0.0.1:8001/admin/geo/states');
+            const res = await fetch('/admin/geo/states');
             if (res.ok) setStates(await res.json());
         } catch (e) { console.error(e); }
     };
@@ -40,7 +40,7 @@ const CoverageAudit = () => {
             if (filters.ward_id) queryParams.append('ward_id', filters.ward_id);
             queryParams.append('limit', '100'); // Balanced for rendering performance
 
-            const res = await fetch(`http://127.0.0.1:8001/admin/unassigned-pus?${queryParams.toString()}`);
+            const res = await fetch(`/admin/unassigned-pus?${queryParams.toString()}`);
             if (res.ok) {
                 const data = await res.json();
                 setGaps(data.gaps || []);
@@ -73,7 +73,7 @@ const CoverageAudit = () => {
     const fetchLgas = async (stateId) => {
         if (!stateId) { setLgas([]); return; }
         try {
-            const res = await fetch(`http://127.0.0.1:8001/admin/geo/states/${stateId}/lgas`);
+            const res = await fetch(`/admin/geo/states/${stateId}/lgas`);
             if (res.ok) setLgas(await res.json());
         } catch (e) { console.error(e); }
     };
@@ -81,7 +81,7 @@ const CoverageAudit = () => {
     const fetchWards = async (lgaId) => {
         if (!lgaId) { setWards([]); return; }
         try {
-            const res = await fetch(`http://127.0.0.1:8001/admin/geo/lgas/${lgaId}/wards`);
+            const res = await fetch(`/admin/geo/lgas/${lgaId}/wards`);
             if (res.ok) setWards(await res.json());
         } catch (e) { console.error(e); }
     };
@@ -198,7 +198,10 @@ const CoverageAudit = () => {
                                 </div>
                             </div>
                             <button
-                                onClick={() => showNotification(`Redirecting to Agent Provisioning for ${gap.name}...`, "info")}
+                                onClick={() => {
+                                    showNotification(`Redirecting to Agent Provisioning for ${gap.name}...`, "info");
+                                    if (setActiveView) setActiveView('agents');
+                                }}
                                 className="opacity-0 group-hover:opacity-100 p-2 text-gray-400 hover:text-brand transition-all flex items-center space-x-1"
                                 title="Assign Agent"
                             >

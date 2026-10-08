@@ -63,7 +63,8 @@ export default defineConfig({
               }
             }
           }
-        ]
+        ],
+        navigateFallbackDenylist: [/^\/static\//, /^\/api\//, /^\/agent\//, /^\/public\//, /^\/admin\//, /^\/auth\//, /^\/upload\//, /^\/results\//]
       }
     })
   ]

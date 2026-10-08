@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 
 export default defineConfig({
+  base: "/agent/",
   server: {
     port: 5173,
     strictPort: true,
@@ -33,6 +34,7 @@ export default defineConfig({
         ]
       },
       workbox: {
+        maximumFileSizeToCacheInBytes: 10485760, // 10MB to allow face-api model caching
         // Caching strategies for spotty networks
         runtimeCaching: [
           {

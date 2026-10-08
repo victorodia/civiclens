@@ -2,20 +2,19 @@ import os
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-# USE ABSOLUTE PATH TO PREVENT "TABLE NOT FOUND" ERRORS
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(BASE_DIR)
-DATABASE_PATH = os.path.join(PROJECT_ROOT, "civiclens.db")
-DATABASE_URL = f"sqlite+aiosqlite:///{DATABASE_PATH}"
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL", 
+    "sqlite+aiosqlite:///" + os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "civiclens.db")
+)
 
 print(f"DATABASE CONNECTING TO: {DATABASE_URL}")
 
 # Create an async database engine
-engine = create_async_engine(
-    DATABASE_URL, 
-    echo=True, 
-    connect_args={"check_same_thread": False}
-)
+# Note: For SQLite we need check_same_thread=False, for Postgres we don't.
+if "sqlite" in DATABASE_URL:
+    engine = create_async_engine(DATABASE_URL, echo=True, connect_args={"check_same_thread": False})
+else:
+    engine = create_async_engine(DATABASE_URL, echo=True)
 
 AsyncSessionLocal = sessionmaker(
     engine, class_=AsyncSession, expire_on_commit=False

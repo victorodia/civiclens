@@ -3,23 +3,84 @@ version: '3.8'
 services:
   db:
     image: postgres:15-alpine
-    container_name: civiclens_db
+    container_name: civiclens-db
+    restart: always
     environment:
-      POSTGRES_USER: civiclens_admin
-      POSTGRES_PASSWORD: super_secure_password_dev
+      POSTGRES_USER: civiclens_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: civiclens
-    ports:
-      - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-    restart: unless-stopped
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - civiclens_net
 
   redis:
     image: redis:7-alpine
-    container_name: civiclens_redis
+    container_name: civiclens-redis
+    restart: always
+    networks:
+      - civiclens_net
+
+  backend:
+    build:
+      context: ./backend
+    container_name: civiclens-backend
+    restart: always
+    environment:
+      - DATABASE_URL=${DATABASE_URL:?set DATABASE_URL in .env}
+      - REDIS_URL=redis://redis:6379/0
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?set JWT_SECRET_KEY in .env}
+    depends_on:
+      - db
+      - redis
+    networks:
+      - civiclens_net
+
+  frontend-admin:
+    build:
+      context: ./admin-portal
+    container_name: civiclens-admin
+    restart: always
+    networks:
+      - civiclens_net
+
+  frontend-agent:
+    build:
+      context: ./agent-portal
+    container_name: civiclens-agent
+    restart: always
+    networks:
+      - civiclens_net
+
+  frontend-citizen:
+    build:
+      context: ./citizen-portal
+    container_name: civiclens-citizen
+    restart: always
+    networks:
+      - civiclens_net
+
+  gateway:
+    build:
+      context: ./nginx-gateway
+    container_name: civiclens-gateway
+    restart: always
     ports:
-      - "6379:6379"
-    restart: unless-stopped
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      - backend
+      - frontend-admin
+      - frontend-agent
+      - frontend-citizen
+    networks:
+      - civiclens_net
 
 volumes:
-  postgres_data:
+  pgdata:
+
+networks:
+  civiclens_net:
+    driver: bridge

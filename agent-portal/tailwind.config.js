@@ -7,12 +7,15 @@ export default {
     darkMode: 'class', // Enable toggling dark mode via class name
     theme: {
         extend: {
+            fontFamily: {
+                sans: ['"Plus Jakarta Sans"', 'sans-serif'],
+            },
             colors: {
                 // Civic Lens Brand Colors
                 brand: {
-                    light: '#E6F8F3', // Light Teal/Green background
-                    DEFAULT: '#0D9488', // Core Nigeria-inspired Green
-                    dark: '#115E59', // Deep Green for headers
+                    light: '#FDE68A', // Amber 200
+                    DEFAULT: '#D97706', // Amber 600
+                    dark: '#92400E', // Amber 800
                 },
                 surface: {
                     light: '#ffffff',

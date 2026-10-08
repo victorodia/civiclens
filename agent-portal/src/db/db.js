@@ -21,8 +21,12 @@ export const saveDraft = async (resultData) => {
 /**
  * Get all pending drafts
  */
-export const getPendingDrafts = async () => {
-    return await db.drafts.where('status').equals('pending').toArray();
+export const getPendingDrafts = async (agentEmail) => {
+    let drafts = await db.drafts.where('status').equals('pending').toArray();
+    if (agentEmail) {
+        drafts = drafts.filter(d => d.agentEmail === agentEmail || !d.agentEmail);
+    }
+    return drafts;
 };
 
 /**

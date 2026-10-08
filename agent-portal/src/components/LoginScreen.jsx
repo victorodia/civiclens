@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Shield, Lock, Mail, Loader2, AlertCircle, Eye, EyeOff } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { useNotification } from '../contexts/NotificationContext';
@@ -10,6 +10,53 @@ const LoginScreen = ({ onLoginSuccess, onRequireReset }) => {
     const [password, setPassword] = useState('');
     const [showPassword, setShowPassword] = useState(false);
     const [loading, setLoading] = useState(false);
+    const [captchaText, setCaptchaText] = useState('');
+    const [captchaInput, setCaptchaInput] = useState('');
+    const canvasRef = useRef(null);
+
+    const generateCaptcha = () => {
+        const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+        let str = '';
+        for(let i=0; i<5; i++) str += chars.charAt(Math.floor(Math.random() * chars.length));
+        setCaptchaText(str);
+        setCaptchaInput('');
+    };
+
+    useEffect(() => {
+        generateCaptcha();
+    }, []);
+
+    useEffect(() => {
+        if (canvasRef.current && captchaText) {
+            const canvas = canvasRef.current;
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = '#f3f4f6';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // Add noise lines
+            for (let i = 0; i < 5; i++) {
+                ctx.beginPath();
+                ctx.moveTo(Math.random() * canvas.width, Math.random() * canvas.height);
+                ctx.lineTo(Math.random() * canvas.width, Math.random() * canvas.height);
+                ctx.strokeStyle = '#9ca3af';
+                ctx.stroke();
+            }
+            
+            ctx.font = 'bold 24px monospace';
+            ctx.fillStyle = '#0D9488';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            // Add some rotation
+            ctx.save();
+            ctx.translate(canvas.width/2, canvas.height/2);
+            const angle = (Math.random() - 0.5) * 0.2;
+            ctx.rotate(angle);
+            ctx.fillText(captchaText, 0, 0);
+            ctx.restore();
+        }
+    }, [captchaText]);
+
 
     const handlePurge = async () => {
         if (window.confirm("RESCUE ACTION: This will permanently delete all local data and fix potential app crashes. Proceed?")) {
@@ -22,8 +69,16 @@ const LoginScreen = ({ onLoginSuccess, onRequireReset }) => {
         e.preventDefault();
         setLoading(true);
 
+        if (captchaInput.toUpperCase() !== captchaText) {
+            showNotification("Incorrect CAPTCHA. Please try again.", "error");
+            generateCaptcha();
+            setLoading(false);
+            return;
+        }
+
+
         try {
-            const response = await fetch('http://127.0.0.1:8001/auth/login', {
+            const response = await fetch('/auth/login', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -39,6 +94,10 @@ const LoginScreen = ({ onLoginSuccess, onRequireReset }) => {
                 throw new Error(data.detail || 'Authentication failed');
             }
 
+            if (data.role !== 'agent') {
+                throw new Error('Unauthorized: This portal is restricted to Field Agents only.');
+            }
+
             if (data.requires_password_reset) {
                 onRequireReset(email);
             } else {
@@ -47,6 +106,7 @@ const LoginScreen = ({ onLoginSuccess, onRequireReset }) => {
             }
         } catch (err) {
             showNotification(err.message, "error");
+            generateCaptcha();
         } finally {
             setLoading(false);
         }
@@ -107,6 +167,25 @@ const LoginScreen = ({ onLoginSuccess, onRequireReset }) => {
                         </div>
                     </div>
 
+
+
+                    <div className="space-y-2">
+                        <label className="text-xs font-bold text-gray-700 dark:text-gray-400 uppercase tracking-wider ml-1">Security Verification</label>
+                        <div className="flex space-x-2">
+                            <div className="w-32 h-14 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden shrink-0 bg-gray-100 flex items-center justify-center cursor-pointer" onClick={generateCaptcha} title="Click to refresh">
+                                <canvas ref={canvasRef} width="128" height="56" className="w-full h-full"></canvas>
+                            </div>
+                            <input
+                                type="text"
+                                value={captchaInput}
+                                onChange={(e) => setCaptchaInput(e.target.value)}
+                                className="w-full px-4 py-4 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 text-gray-900 dark:text-white focus:ring-2 focus:ring-brand outline-none transition-all placeholder:text-gray-400 uppercase font-mono"
+                                placeholder="Enter CAPTCHA"
+                                required
+                                maxLength="5"
+                            />
+                        </div>
+                    </div>
 
                     <button
                         type="submit"

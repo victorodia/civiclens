@@ -19,11 +19,11 @@ const VerificationScreen = () => {
         const fetchData = async () => {
             try {
                 // Fetch party config
-                const configRes = await fetch('http://127.0.0.1:8001/admin/election-config');
+                const configRes = await fetch('/admin/election-config');
                 if (configRes.ok) setPartyConfig(await configRes.json());
 
                 // Fetch pending results (mocking the real endpoint for now if not ready, but backend list showed it exists)
-                const res = await fetch('http://127.0.0.1:8001/admin/pending-verifications');
+                const res = await fetch('/admin/pending-verifications');
                 if (res.ok) {
                     const data = await res.json();
                     setItems(data);
@@ -55,7 +55,7 @@ const VerificationScreen = () => {
 
     const handleVerify = async (action) => {
         try {
-            const res = await fetch(`http://127.0.0.1:8001/admin/verify/${current.id}?action=${action}`, {
+            const res = await fetch(`/admin/verify/${current.id}?action=${action}`, {
                 method: 'POST'
             });
             if (res.ok) {

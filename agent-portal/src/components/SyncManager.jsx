@@ -39,13 +39,20 @@ const SyncManager = ({ assignedPu }) => {
         }
     }, [pendingDrafts.length]);
 
+    // Auto-sync effect
+    useEffect(() => {
+        if (isOnline && pendingDrafts.length > 0 && !syncing) {
+            handleSync();
+        }
+    }, [isOnline, pendingDrafts.length]);
+
     const loadDrafts = async () => {
-        const drafts = await getPendingDrafts();
+        const drafts = await getPendingDrafts(assignedPu?.email);
         setPendingDrafts(drafts);
     };
 
     const handleSync = async () => {
-        if (!isOnline || pendingDrafts.length === 0) return;
+        if (!isOnline || pendingDrafts.length === 0 || syncing) return;
 
         setSyncing(true);
         setError(null);
@@ -62,7 +69,7 @@ const SyncManager = ({ assignedPu }) => {
                     console.log("Uploading image...");
                     const imageFormData = new FormData();
                     imageFormData.append('file', draft.image);
-                    const uploadResponse = await fetch('http://127.0.0.1:8001/upload/form-ec8a', {
+                    const uploadResponse = await fetch('/upload/form-ec8a', {
                         method: 'POST',
                         body: imageFormData
                     });
@@ -82,7 +89,7 @@ const SyncManager = ({ assignedPu }) => {
                     console.log("Uploading video...");
                     const videoFormData = new FormData();
                     videoFormData.append('file', draft.video);
-                    const uploadResponse = await fetch('http://127.0.0.1:8001/upload/form-ec8a', {
+                    const uploadResponse = await fetch('/upload/form-ec8a', {
                         method: 'POST',
                         body: videoFormData
                     });
@@ -116,7 +123,7 @@ const SyncManager = ({ assignedPu }) => {
                     longitude: draft.location?.lng
                 };
 
-                const submitResponse = await fetch('http://127.0.0.1:8001/results/submit', {
+                const submitResponse = await fetch('/results/submit', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(resultPayload)

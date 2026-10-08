@@ -1,3 +1,4 @@
+import React, { useState } from "react";
 import { UserCircle, Shield, KeyRound, Smartphone, MapPin, CheckCircle2 } from 'lucide-react';
 import { useNotification } from '../contexts/NotificationContext';
 

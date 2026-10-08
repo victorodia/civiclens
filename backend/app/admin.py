@@ -7,6 +7,10 @@ from pydantic import BaseModel
 from .db import get_db
 from .verification import mock_ocr_analysis, verify_result_integrity
 
+from .models import User, Role, CustomRole, State, LGA, Ward, PollingUnit, Result, ElectionConfig, AuditLog
+from .security import get_current_user, RequirePermission, log_audit, verify_password, get_password_hash
+
+
 print("[BOOT] Admin Telemetry Module Loaded")
 router = APIRouter(prefix="/admin", tags=["Admin Verification"])
 
@@ -14,6 +18,11 @@ import pyotp
 import qrcode
 import io
 import base64
+
+
+class RoleSchema(BaseModel):
+    name: str
+    permissions: List[str] = []
 
 class TOTPVerifySchema(BaseModel):
     token: str
@@ -72,7 +81,7 @@ async def approve_result(result_id: str, action: str, db: AsyncSession = Depends
     if not result:
         raise HTTPException(status_code=404, detail="Result not found.")
         
-    from .security import log_audit
+    from .security import log_audit, get_current_user, RequirePermission
     
     if action.upper() == 'APPROVE':
         result.is_verified = True
@@ -97,7 +106,7 @@ from pydantic import BaseModel
 import secrets
 import string
 from .models import User
-from .security import get_password_hash
+from .security import get_password_hash, get_current_user, RequirePermission
 
 class ProvisionSchema(BaseModel):
     emails: List[str]
@@ -206,7 +215,7 @@ async def revoke_agent(agent_id: str, payload: RevokeSchema, db: AsyncSession = 
     Secure Revocation: Requires administrative re-authentication.
     Purges an agent from the system, effectively killing their access.
     """
-    from .security import verify_password
+    from .security import verify_password, get_current_user, RequirePermission
     from .models import User
     
     # 1. Verify Administrative Re-authentication
@@ -246,7 +255,7 @@ async def revoke_agent(agent_id: str, payload: RevokeSchema, db: AsyncSession = 
         raise HTTPException(status_code=403, detail="Only field agent accounts can be revoked via this pipeline.")
 
     # 3. Purge & Audit
-    from .security import log_audit
+    from .security import log_audit, get_current_user, RequirePermission
     
     # Audit trail for personnel decommissioning
     await log_audit(
@@ -271,7 +280,7 @@ async def factory_reset_system(payload: RevokeSchema, db: AsyncSession = Depends
     NUCLEAR OPTION: Purges all results and field agent accounts.
     Requires administrative re-authentication.
     """
-    from .security import verify_password
+    from .security import verify_password, get_current_user, RequirePermission
     from .models import User, Result
     from sqlalchemy import delete
 
@@ -293,7 +302,7 @@ async def factory_reset_system(payload: RevokeSchema, db: AsyncSession = Depends
 
     # 2. Sequential Purgation (Nuclear Option)
     from sqlalchemy import text
-    from .security import log_audit
+    from .security import log_audit, get_current_user, RequirePermission
     
     # Audit before destruction
     await log_audit(
@@ -326,7 +335,7 @@ async def get_workforce_monitor(
     pu_id: Optional[str] = None,
     on_site: Optional[bool] = None,
     result_uploaded: Optional[bool] = None,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db), user = Depends(RequirePermission("view_agents"))
 ):
     """
     Advanced Workforce Monitoring: Correlates agent presence with geographic binding and results.
@@ -390,7 +399,7 @@ async def get_unassigned_pus(
     lga_id: Optional[str] = None,
     ward_id: Optional[str] = None,
     limit: int = 150,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db), user = Depends(RequirePermission("view_agents"))
 ):
     """
     Electronic Coverage Audit: Identifies Polling Units without assigned field agents.
@@ -465,7 +474,7 @@ async def get_live_stats(
     lga_id: Optional[str] = None,
     ward_id: Optional[str] = None,
     pu_id: Optional[str] = None,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db), user = Depends(RequirePermission("view_results"))
 ):
     """Returns the rolling aggregate for the Situation Room charts with LIVE data, optionally filtered."""
     print(f"[TELEMETRY] Live Collation Request Received: state={state_id}, lga={lga_id}, ward={ward_id}, pu={pu_id}")
@@ -586,3 +595,124 @@ async def get_system_health(db: AsyncSession = Depends(get_db)):
         "latency": "24ms",
         "integrity_score": 99.8
     }
+
+
+@router.get("/system/roles")
+async def get_roles(db: AsyncSession = Depends(get_db), user = Depends(RequirePermission("view_system_users"))):
+    result = await db.execute(select(Role))
+    return result.scalars().all()
+
+@router.post("/system/roles")
+async def create_role(payload: RoleSchema, db: AsyncSession = Depends(get_db), user = Depends(RequirePermission("create_system_users"))):
+    role = Role(**payload.dict())
+    db.add(role)
+    await db.commit()
+    await db.refresh(role)
+    return role
+
+@router.put("/system/roles/{role_id}")
+async def update_role(role_id: str, payload: RoleSchema, db: AsyncSession = Depends(get_db), user = Depends(RequirePermission("change_user_roles"))):
+    result = await db.execute(select(Role).filter_by(id=role_id))
+    role = result.scalar_one_or_none()
+    if not role:
+        raise HTTPException(status_code=404, detail="Role not found")
+    for k, v in payload.dict().items():
+        setattr(role, k, v)
+    await db.commit()
+    return role
+
+@router.delete("/system/roles/{role_id}")
+async def delete_role(role_id: str, db: AsyncSession = Depends(get_db), user = Depends(RequirePermission("delete_system_users"))):
+    result = await db.execute(select(Role).filter_by(id=role_id))
+    role = result.scalar_one_or_none()
+    if not role:
+        raise HTTPException(status_code=404, detail="Role not found")
+    await db.delete(role)
+    await db.commit()
+    return {"message": "Role deleted"}
+
+@router.get("/my-permissions")
+async def get_my_permissions(db: AsyncSession = Depends(get_db), user = Depends(get_current_user)):
+    from .models import Role
+    from sqlalchemy import select
+    stmt = select(Role).where(Role.name == user.role)
+    res = await db.execute(stmt)
+    role = res.scalar_one_or_none()
+    return {"role": user.role, "permissions": role.permissions if role else []}
+
+class SystemUserCreate(BaseModel):
+    email: str
+    full_name: str
+    role: str
+    password: str
+
+class SystemUserUpdate(BaseModel):
+    full_name: Optional[str] = None
+    role: Optional[str] = None
+    is_active: Optional[bool] = None
+
+@router.get("/system/users")
+async def get_system_users(db: AsyncSession = Depends(get_db), _: User = Depends(RequirePermission("view_system_users"))):
+    from sqlalchemy import select
+    from .models import User
+    # Only return non-agent users
+    res = await db.execute(select(User).where(User.role != "agent"))
+    users = res.scalars().all()
+    return [
+        {"id": u.id, "email": u.email, "full_name": u.full_name, "role": u.role, "is_active": u.is_active}
+        for u in users
+    ]
+
+@router.post("/system/users")
+async def create_system_user(payload: SystemUserCreate, db: AsyncSession = Depends(get_db), _: User = Depends(RequirePermission("create_system_users"))):
+    from .models import User
+    from sqlalchemy import select
+    from .security import get_password_hash, get_current_user, RequirePermission
+    
+    # check exists
+    res = await db.execute(select(User).where(User.email == payload.email))
+    if res.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="Email already registered")
+        
+    new_user = User(
+        email=payload.email,
+        full_name=payload.full_name,
+        role=payload.role,
+        hashed_password=get_password_hash(payload.password),
+        is_active=True,
+        requires_password_reset=True
+    )
+    db.add(new_user)
+    await db.commit()
+    return {"status": "success", "id": new_user.id}
+
+@router.put("/system/users/{user_id}")
+async def update_system_user(user_id: str, payload: SystemUserUpdate, db: AsyncSession = Depends(get_db), _: User = Depends(RequirePermission("create_system_users"))):
+    from .models import User
+    from sqlalchemy import select
+    res = await db.execute(select(User).where(User.id == user_id))
+    user = res.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    if payload.full_name is not None:
+        user.full_name = payload.full_name
+    if payload.role is not None:
+        user.role = payload.role
+    if payload.is_active is not None:
+        user.is_active = payload.is_active
+        
+    await db.commit()
+    return {"status": "success"}
+
+@router.delete("/system/users/{user_id}")
+async def delete_system_user(user_id: str, db: AsyncSession = Depends(get_db), _: User = Depends(RequirePermission("create_system_users"))):
+    from .models import User
+    from sqlalchemy import select
+    res = await db.execute(select(User).where(User.id == user_id))
+    user = res.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    await db.delete(user)
+    await db.commit()
+    return {"status": "success"}

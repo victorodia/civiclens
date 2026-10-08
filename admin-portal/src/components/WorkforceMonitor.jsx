@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { Users, MapPin, CheckCircle, Clock, Image as ImageIcon, Filter, Search, RefreshCw, X, Shield, ExternalLink } from 'lucide-react';
+import { Users, MapPin, CheckCircle, Clock, Image as ImageIcon, Filter, Search, RefreshCw, X, Shield, ExternalLink, Download } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 const WorkforceMonitor = () => {
     const [workforce, setWorkforce] = useState([]);
     const [isLoading, setIsLoading] = useState(true);
     const [isRefreshing, setIsRefreshing] = useState(false);
+    const [viewingImage, setViewingImage] = useState(null);
 
     // Geographic State for Filters
     const [states, setStates] = useState([]);
@@ -30,7 +31,7 @@ const WorkforceMonitor = () => {
 
     const fetchStates = async () => {
         try {
-            const res = await fetch('http://127.0.0.1:8001/admin/geo/states');
+            const res = await fetch('/admin/geo/states');
             if (res.ok) setStates(await res.json());
         } catch (e) { console.error(e); }
     };
@@ -46,7 +47,7 @@ const WorkforceMonitor = () => {
             if (filters.on_site !== '') queryParams.append('on_site', filters.on_site);
             if (filters.result_uploaded !== '') queryParams.append('result_uploaded', filters.result_uploaded);
 
-            const res = await fetch(`http://127.0.0.1:8001/admin/workforce-status?${queryParams.toString()}`);
+            const res = await fetch(`/admin/workforce-status?${queryParams.toString()}`);
             if (res.ok) {
                 const data = await res.json();
                 setWorkforce(Array.isArray(data) ? data : []);
@@ -84,7 +85,7 @@ const WorkforceMonitor = () => {
     const fetchLgas = async (stateId) => {
         if (!stateId) { setLgas([]); return; }
         try {
-            const res = await fetch(`http://127.0.0.1:8001/admin/geo/states/${stateId}/lgas`);
+            const res = await fetch(`/admin/geo/states/${stateId}/lgas`);
             if (res.ok) setLgas(await res.json());
         } catch (e) { console.error(e); }
     };
@@ -92,7 +93,7 @@ const WorkforceMonitor = () => {
     const fetchWards = async (lgaId) => {
         if (!lgaId) { setWards([]); return; }
         try {
-            const res = await fetch(`http://127.0.0.1:8001/admin/geo/lgas/${lgaId}/wards`);
+            const res = await fetch(`/admin/geo/lgas/${lgaId}/wards`);
             if (res.ok) setWards(await res.json());
         } catch (e) { console.error(e); }
     };
@@ -100,7 +101,7 @@ const WorkforceMonitor = () => {
     const fetchPus = async (wardId) => {
         if (!wardId) { setPus([]); return; }
         try {
-            const res = await fetch(`http://127.0.0.1:8001/admin/geo/wards/${wardId}/pus`);
+            const res = await fetch(`/admin/geo/wards/${wardId}/pus`);
             if (res.ok) setPus(await res.json());
         } catch (e) { console.error(e); }
     };
@@ -344,11 +345,19 @@ const WorkforceMonitor = () => {
                                     </td>
                                     <td className="p-5 text-center">
                                         {agent.has_result ? (
-                                            <div className="inline-flex flex-col items-center">
-                                                <div className="w-6 h-6 bg-brand/10 rounded-full flex items-center justify-center mb-1">
-                                                    <ImageIcon className="w-3.5 h-3.5 text-brand" />
-                                                </div>
-                                                <span className="text-[8px] font-black text-brand uppercase tracking-tighter">Uploaded</span>
+                                            <div className="flex items-center justify-center space-x-3">
+                                                <button onClick={() => setViewingImage(agent.result_image_url)} className="inline-flex flex-col items-center cursor-pointer hover:opacity-80 transition-opacity">
+                                                    <div className="w-6 h-6 bg-brand/10 rounded-full flex items-center justify-center mb-1">
+                                                        <ImageIcon className="w-3.5 h-3.5 text-brand" />
+                                                    </div>
+                                                    <span className="text-[8px] font-black text-brand uppercase tracking-tighter hover:underline">Uploaded</span>
+                                                </button>
+                                                <a href={agent.result_image_url} download className="inline-flex flex-col items-center cursor-pointer hover:opacity-80 transition-opacity">
+                                                    <div className="w-6 h-6 bg-blue-500/10 rounded-full flex items-center justify-center mb-1">
+                                                        <Download className="w-3.5 h-3.5 text-blue-500" />
+                                                    </div>
+                                                    <span className="text-[8px] font-black text-blue-500 uppercase tracking-tighter hover:underline">Download</span>
+                                                </a>
                                             </div>
                                         ) : (
                                             <div className="inline-flex flex-col items-center opacity-30">
@@ -363,6 +372,32 @@ const WorkforceMonitor = () => {
                     </table>
                 </div>
             </div>
+            
+            <AnimatePresence>
+                {viewingImage && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm" onClick={() => setViewingImage(null)}>
+                        <motion.div
+                            initial={{ opacity: 0, scale: 0.95 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.95 }}
+                            className="relative max-w-4xl w-full max-h-[90vh] flex flex-col items-center justify-center"
+                            onClick={(e) => e.stopPropagation()}
+                        >
+                            <button
+                                onClick={() => setViewingImage(null)}
+                                className="absolute -top-12 right-0 p-2 text-white/70 hover:text-white bg-black/50 hover:bg-black/80 rounded-full transition-all"
+                            >
+                                <X className="w-6 h-6" />
+                            </button>
+                            <img
+                                src={viewingImage}
+                                alt="Result Evidence"
+                                className="max-w-full max-h-[85vh] object-contain rounded-xl shadow-2xl"
+                            />
+                        </motion.div>
+                    </div>
+                )}
+            </AnimatePresence>
         </div>
     );
 };

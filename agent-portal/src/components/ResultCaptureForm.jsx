@@ -25,7 +25,7 @@ const ResultCaptureForm = ({ assignedPu }) => {
 
     // Fetch party names from admin-configured election config
     useEffect(() => {
-        fetch('http://127.0.0.1:8001/admin/election-config')
+        fetch('/admin/election-config')
             .then(res => res.ok ? res.json() : null)
             .then(data => { if (data) setPartyConfig(data); })
             .catch(() => { }); // Fail silently — defaults remain
@@ -131,7 +131,7 @@ const ResultCaptureForm = ({ assignedPu }) => {
             const payload = { email: assignedPu.email, latitude: coords.latitude, longitude: coords.longitude };
             console.log('[CHECK-IN] Payload:', JSON.stringify(payload));
             try {
-                const res = await fetch('http://127.0.0.1:8001/auth/agent/check-in', {
+                const res = await fetch('/auth/agent/check-in', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
@@ -185,6 +185,22 @@ const ResultCaptureForm = ({ assignedPu }) => {
         }
 
         try {
+            // Get GPS Location on Submit
+            let locationData = formData.location;
+            if (!locationData && navigator.geolocation) {
+                locationData = await new Promise((resolve) => {
+                    navigator.geolocation.getCurrentPosition(
+                        (position) => resolve({
+                            lat: position.coords.latitude,
+                            lng: position.coords.longitude,
+                            accuracy: position.coords.accuracy
+                        }),
+                        (err) => resolve(null),
+                        { enableHighAccuracy: true, timeout: 5000 }
+                    );
+                });
+            }
+
             // SECURITY HARDENING: Payload Signing
             // Generating HMAC-SHA256 to ensure data integrity during synchronization
             const payloadToSign = `${formData.puCode}|${formData.partyAVotes}|${formData.partyBVotes}|${formData.partyCVotes}`;
@@ -202,6 +218,7 @@ const ResultCaptureForm = ({ assignedPu }) => {
 
             const submissionData = {
                 ...formData,
+                location: locationData || formData.location,
                 agentEmail: assignedPu?.email,
                 signature,
                 signedTimestamp: new Date().toISOString(),
@@ -447,23 +464,7 @@ const ResultCaptureForm = ({ assignedPu }) => {
             </div>
 
             {/* Geo Capture */}
-            <button
-                type="button"
-                onClick={captureLocation}
-                className={`w-full flex items-center justify-center space-x-2 p-4 rounded-xl border-2 transition-all ${formData.location
-                    ? 'border-brand text-brand bg-brand/5'
-                    : 'border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300'
-                    }`}
-            >
-                {geoloading ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                ) : (
-                    <>
-                        <MapPin className="w-5 h-5" />
-                        <span>{formData.location ? 'Location Captured' : 'Attach GPS Metadata'}</span>
-                    </>
-                )}
-            </button>
+            {/* GPS Metadata is captured automatically on submit */}
 
             {error && (
                 <div className="flex items-center space-x-2 text-red-600 bg-red-50 dark:bg-red-900/20 p-3 rounded-lg text-sm border border-red-100 dark:border-red-900/30">

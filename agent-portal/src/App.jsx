@@ -5,17 +5,18 @@ import SyncManager from './components/SyncManager';
 import LoginScreen from './components/LoginScreen';
 import PasswordResetScreen from './components/PasswordResetScreen';
 import UserProfileScreen from './components/UserProfileScreen';
-import { NotificationProvider } from './contexts/NotificationContext';
+import { NotificationProvider, useNotification } from './contexts/NotificationContext';
 import NotificationBanner from './components/NotificationBanner';
 import { Camera, UserCircle } from 'lucide-react';
+import { clearAllData, getPendingDrafts } from './db/db';
 
 function LayoutShell({ children, activeView, setActiveView, onLogout, assignedPu }) {
   const { isDarkMode, toggleTheme } = useTheme();
-  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const { showNotification } = useNotification();
 
   useEffect(() => {
-    const handleOnline = () => setIsOnline(true);
-    const handleOffline = () => setIsOnline(false);
+    const handleOnline = () => showNotification('Connection restored. You are back online.', 'success');
+    const handleOffline = () => showNotification('No Internet Connection. Working Offline.', 'warning');
 
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
@@ -24,14 +25,10 @@ function LayoutShell({ children, activeView, setActiveView, onLogout, assignedPu
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, []);
+  }, [showNotification]);
 
   return (
     <div className="min-h-screen flex flex-col font-sans">
-      {/* Offline Banner */}
-      <div className={`offline-banner ${!isOnline ? 'visible' : ''}`}>
-        No Internet Connection - Working Offline
-      </div>
 
       {/* Header */}
       <header className="bg-brand text-white shadow-md pt-5 pb-4 px-4 sticky top-0 z-40 transition-colors duration-200 dark:bg-brand-dark">
@@ -93,15 +90,47 @@ function LayoutShell({ children, activeView, setActiveView, onLogout, assignedPu
 }
 
 function App() {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isAuthenticated, setIsAuthenticated] = useState(() => {
+    return localStorage.getItem('isAuthenticated') === 'true';
+  });
   const [isResetRequired, setIsResetRequired] = useState(false);
   const [resetEmail, setResetEmail] = useState('');
-  const [activeView, setActiveView] = useState('capture');
-  const [assignedPu, setAssignedPu] = useState(null);
+  const [activeView, setActiveView] = useState(() => {
+    return localStorage.getItem('activeView') || 'capture';
+  });
+  
+  // Intercept setActiveView to persist it
+  const setPersistedActiveView = (view) => {
+    localStorage.setItem('activeView', view);
+    setActiveView(view);
+  };
+
+  const [assignedPu, setAssignedPu] = useState(() => {
+    const saved = localStorage.getItem('assignedPu');
+    return saved ? JSON.parse(saved) : null;
+  });
 
   useEffect(() => {
     console.log("[CIVIC LENS] Agent Portal v1.0.0-PROD Initialization Complete");
   }, []);
+
+  const handleLogout = async () => {
+    const drafts = await getPendingDrafts(assignedPu?.email);
+    if (drafts.length > 0) {
+        const proceed = window.confirm(`WARNING: You have ${drafts.length} un-synced results.\n\nIf you sign out now, you MUST sign back into this exact device later to sync them.\n\nProceed with sign out?`);
+        if (!proceed) return;
+    }
+
+    // DO NOT clearAllData() here so offline sync queue remains intact
+    setIsAuthenticated(false);
+    setAssignedPu(null);
+    
+    // Only purge session state, DO NOT touch Service Worker Caches or IndexedDB
+    localStorage.clear();
+    sessionStorage.clear();
+    
+    window.location.reload();
+  };
 
   return (
     <ThemeProvider>
@@ -110,7 +139,12 @@ function App() {
 
         {!isAuthenticated && !isResetRequired && (
           <LoginScreen
-            onLoginSuccess={(pu) => { setAssignedPu(pu); setIsAuthenticated(true); }}
+            onLoginSuccess={(pu) => { 
+                localStorage.setItem('isAuthenticated', 'true');
+                localStorage.setItem('assignedPu', JSON.stringify(pu));
+                setAssignedPu(pu); 
+                setIsAuthenticated(true); 
+            }}
             onRequireReset={(email) => { setResetEmail(email); setIsResetRequired(true); }}
           />
         )}
@@ -125,8 +159,8 @@ function App() {
         {isAuthenticated && !isResetRequired && (
           <LayoutShell
             activeView={activeView}
-            setActiveView={setActiveView}
-            onLogout={() => { setIsAuthenticated(false); setAssignedPu(null); }}
+            setActiveView={setPersistedActiveView}
+            onLogout={handleLogout}
             assignedPu={assignedPu}
           >
             <div className="flex-1 flex flex-col">
@@ -140,7 +174,7 @@ function App() {
                 </div>
               )}
 
-              {activeView === 'profile' && <UserProfileScreen onLogout={() => setIsAuthenticated(false)} />}
+              {activeView === 'profile' && <UserProfileScreen onLogout={handleLogout} assignedPu={assignedPu} />}
             </div>
           </LayoutShell>
         )}

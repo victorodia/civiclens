@@ -58,6 +58,10 @@ async def login(
          raise HTTPException(status_code=401, detail="Invalid credentials")
 
     user, pu, ward, lga, state = row
+
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account has been deactivated. Contact the system administrator.")
+
     print("[DEBUG AUTH] Found user:", user.email, "hashed_pwd:", user.hashed_password)
     print("[DEBUG AUTH] Input password:", password)
 
@@ -102,6 +106,7 @@ async def login(
     if user.requires_password_reset:
         return {
             "access_token": None,
+            "role": user.role,
             "requires_password_reset": True,
             "message": "Mandatory secure password reset required."
         }
@@ -132,6 +137,7 @@ async def login(
     return {
         "access_token": access_token, 
         "token_type": "bearer",
+        "role": user.role,
         "requires_password_reset": False,
         "assigned_pu": assigned_pu,
         "notice": "Login Successful."

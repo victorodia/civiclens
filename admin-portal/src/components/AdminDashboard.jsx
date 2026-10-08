@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, PieChart, Pie } from 'recharts';
-import { ShieldCheck, TrendingUp, Users, Map, Clock, AlertTriangle } from 'lucide-react';
+import { ShieldCheck, TrendingUp, Users, Map, Clock, AlertTriangle, FileText } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { useNotification } from '../contexts/NotificationContext';
 
@@ -45,11 +45,11 @@ const AdminDashboard = ({ setActiveView }) => {
     });
 
     const fetchGeo = async (type, id = null) => {
-        let url = `http://127.0.0.1:8001/admin/geo/${type}`;
+        let url = `/admin/geo/${type}`;
         if (id) {
-            if (type === 'lgas') url = `http://127.0.0.1:8001/admin/geo/states/${id}/lgas`;
-            if (type === 'wards') url = `http://127.0.0.1:8001/admin/geo/lgas/${id}/wards`;
-            if (type === 'pus') url = `http://127.0.0.1:8001/admin/geo/wards/${id}/pus`;
+            if (type === 'lgas') url = `/admin/geo/states/${id}/lgas`;
+            if (type === 'wards') url = `/admin/geo/lgas/${id}/wards`;
+            if (type === 'pus') url = `/admin/geo/wards/${id}/pus`;
         }
         try {
             const res = await fetch(url);
@@ -104,7 +104,7 @@ const AdminDashboard = ({ setActiveView }) => {
             if (filters.ward) query.append('ward_id', filters.ward);
             if (filters.pu) query.append('pu_id', filters.pu);
 
-            const response = await fetch(`http://127.0.0.1:8001/admin/stats/collation?${query.toString()}`);
+            const response = await fetch(`/admin/stats/collation?${query.toString()}`);
             if (response.ok) {
                 const data = await response.json();
                 setStats(data);
@@ -118,7 +118,7 @@ const AdminDashboard = ({ setActiveView }) => {
 
     const fetchHealth = async () => {
         try {
-            const res = await fetch('http://127.0.0.1:8001/admin/health');
+            const res = await fetch('/admin/health');
             if (res.ok) setHealth(await res.json());
         } catch (e) { console.error(e); }
     };
@@ -126,7 +126,7 @@ const AdminDashboard = ({ setActiveView }) => {
     useEffect(() => {
         const fetchPartyConfig = async () => {
             try {
-                const response = await fetch('http://127.0.0.1:8001/admin/election-config');
+                const response = await fetch('/admin/election-config');
                 if (response.ok) {
                     const data = await response.json();
                     setPartyConfig(data);
@@ -295,26 +295,45 @@ const AdminDashboard = ({ setActiveView }) => {
             </div>
 
             {/* Verification Feed Access */}
-            <div
-                onClick={() => setActiveView?.('verify')}
-                className="bg-slate-50 dark:bg-gray-950 p-4 rounded-2xl border border-gray-200 dark:border-gray-800 flex items-center justify-between group cursor-pointer hover:border-brand transition-all shadow-sm active:scale-[0.99]"
-            >
-                <div className="flex items-center space-x-3">
-                    <div className="bg-white dark:bg-gray-900 p-2 rounded-xl shadow-sm">
-                        <Clock className="w-5 h-5 text-brand" />
+            <div className="grid grid-cols-2 gap-4">
+                <div
+                    onClick={() => setActiveView?.('verify')}
+                    className="bg-slate-50 dark:bg-gray-950 p-4 rounded-2xl border border-gray-200 dark:border-gray-800 flex items-center justify-between group cursor-pointer hover:border-brand transition-all shadow-sm active:scale-[0.99]"
+                >
+                    <div className="flex items-center space-x-3">
+                        <div className="bg-white dark:bg-gray-900 p-2 rounded-xl shadow-sm">
+                            <Clock className="w-5 h-5 text-brand" />
+                        </div>
+                        <div>
+                            <p className="text-xs font-bold text-gray-900 dark:text-white uppercase tracking-tight">Pending Human Review</p>
+                            <p className="text-[10px] text-gray-500 font-bold">
+                                {stats.flagged_count || 0} results flagged by AI
+                            </p>
+                        </div>
                     </div>
-                    <div>
-                        <p className="text-xs font-bold text-gray-900 dark:text-white uppercase tracking-tight">Pending Human Review</p>
-                        <p className="text-[10px] text-gray-500 font-bold">
-                            {stats.flagged_count || 0} results flagged by AI
-                        </p>
+                    <div className="flex items-center space-x-2">
+                        {stats.flagged_count > 0 && (
+                            <div className="w-2 h-2 bg-amber-500 rounded-full animate-ping"></div>
+                        )}
+                        <AlertTriangle className="w-5 h-5 text-amber-500 group-hover:scale-110 transition-transform" />
                     </div>
                 </div>
-                <div className="flex items-center space-x-2">
-                    {stats.flagged_count > 0 && (
-                        <div className="w-2 h-2 bg-amber-500 rounded-full animate-ping"></div>
-                    )}
-                    <AlertTriangle className="w-5 h-5 text-amber-500 group-hover:scale-110 transition-transform" />
+
+                <div
+                    onClick={() => setActiveView?.('feed')}
+                    className="bg-slate-50 dark:bg-gray-950 p-4 rounded-2xl border border-gray-200 dark:border-gray-800 flex items-center justify-between group cursor-pointer hover:border-brand transition-all shadow-sm active:scale-[0.99]"
+                >
+                    <div className="flex items-center space-x-3">
+                        <div className="bg-white dark:bg-gray-900 p-2 rounded-xl shadow-sm">
+                            <FileText className="w-5 h-5 text-brand" />
+                        </div>
+                        <div>
+                            <p className="text-xs font-bold text-gray-900 dark:text-white uppercase tracking-tight">All Documents Feed</p>
+                            <p className="text-[10px] text-gray-500 font-bold">
+                                Browse all uploaded evidence
+                            </p>
+                        </div>
+                    </div>
                 </div>
             </div>
 

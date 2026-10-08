@@ -3,7 +3,11 @@ import { UserCircle, Shield, KeyRound, Smartphone, MapPin, CheckCircle2 } from '
 import { useNotification } from '../contexts/NotificationContext';
 import { clearAllData } from '../db/db';
 
-const UserProfileScreen = ({ agentId = "AGT-9428-21", puCode = "01-02-03-004", onLogout }) => {
+const UserProfileScreen = ({ assignedPu, onLogout }) => {
+    const agentId = assignedPu?.email || "AGT-UNKNOWN";
+    const puCode = assignedPu?.pu_code || "Unknown";
+    const profilePic = assignedPu?.profile_picture || null;
+
     const { showNotification } = useNotification();
     const [activeTab, setActiveTab] = useState('overview'); // overview, password
     const [loading, setLoading] = useState(false);
@@ -39,8 +43,14 @@ const UserProfileScreen = ({ agentId = "AGT-9428-21", puCode = "01-02-03-004", o
             {/* Header */}
             <div className="flex items-center space-x-4 mb-6">
                 <div className="w-16 h-16 bg-brand-light dark:bg-brand-dark/30 rounded-full flex items-center justify-center border-4 border-white dark:border-gray-900 shadow-sm relative">
-                    <UserCircle className="w-10 h-10 text-brand" />
-                    <div className="absolute bottom-0 right-0 w-4 h-4 bg-green-500 border-2 border-white dark:border-gray-900 rounded-full"></div>
+                    <div className="w-full h-full rounded-full overflow-hidden">
+                        {profilePic ? (
+                            <img src={profilePic} alt="Agent Profile" className="w-full h-full object-cover" />
+                        ) : (
+                            <UserCircle className="w-10 h-10 text-brand mt-2 ml-2" />
+                        )}
+                    </div>
+                    <div className="absolute bottom-0 right-0 w-4 h-4 bg-green-500 border-2 border-white dark:border-gray-900 rounded-full z-10"></div>
                 </div>
                 <div>
                     <h2 className="text-xl font-black text-gray-900 dark:text-white uppercase tracking-tight">Agent Profile</h2>

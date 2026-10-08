@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { Settings, CheckCircle, RefreshCw, Edit3, Trash2, AlertTriangle, ShieldAlert } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { useNotification } from '../contexts/NotificationContext';
+import SystemUsers from './SystemUsers';
+import RoleManagement from './RoleManagement';
 
 const ElectionConfig = () => {
     const { showNotification } = useNotification();
@@ -21,7 +23,7 @@ const ElectionConfig = () => {
     const fetchConfig = async () => {
         setIsLoading(true);
         try {
-            const res = await fetch('http://127.0.0.1:8001/admin/election-config');
+            const res = await fetch('/admin/election-config');
             if (res.ok) {
                 const data = await res.json();
                 setConfig(data);
@@ -37,7 +39,7 @@ const ElectionConfig = () => {
         e.preventDefault();
         setIsSaving(true);
         try {
-            const res = await fetch('http://127.0.0.1:8001/admin/election-config', {
+            const res = await fetch('/admin/election-config', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(config)
@@ -65,7 +67,7 @@ const ElectionConfig = () => {
 
         setIsSaving(true);
         try {
-            const res = await fetch('http://127.0.0.1:8001/admin/factory-reset', {
+            const res = await fetch('/admin/factory-reset', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ admin_password: password })
@@ -200,8 +202,13 @@ const ElectionConfig = () => {
                 </div>
             </div>
 
+            {/* User Management Module */}
+            <RoleManagement />
+            <div className="h-12"></div>
+            <SystemUsers />
+
             {/* Danger Zone */}
-            <div className="bg-red-50 dark:bg-red-950/20 p-6 rounded-3xl border border-red-200 dark:border-red-900/30 shadow-xl overflow-hidden relative group">
+            <div className="bg-red-50 dark:bg-red-950/20 p-6 rounded-3xl border border-red-200 dark:border-red-900/30 shadow-xl overflow-hidden relative group mt-6">
                 <div className="absolute -right-4 -top-4 opacity-5 group-hover:opacity-10 transition-opacity">
                     <ShieldAlert className="w-32 h-32 text-red-600" />
                 </div>

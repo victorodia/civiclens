@@ -1,0 +1,14 @@
+node_modules/
+__pycache__/
+*.pyc
+*.db
+*.log
+dist/
+.env
+!*.env.example
+*.key
+*.pem
+agent-portal/public/models/
+backend/app/static/uploads/
+backend_logs.txt
+build.log

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 import { ShieldCheck, TrendingUp, Map, Info } from 'lucide-react';
 import { motion } from 'framer-motion';
@@ -19,11 +19,72 @@ const PublicDashboard = () => {
     });
     const [isLoading, setIsLoading] = useState(true);
 
+    const [filters, setFilters] = useState({ state: '', lga: '', ward: '', pu: '' });
+    const [geoOptions, setGeoOptions] = useState({ states: [], lgas: [], wards: [], pus: [] });
+
+    const fetchGeo = async (type, id = null) => {
+        let url = `/admin/geo/${type}`;
+        if (id) {
+            if (type === 'lgas') url = `/admin/geo/states/${id}/lgas`;
+            if (type === 'wards') url = `/admin/geo/lgas/${id}/wards`;
+            if (type === 'pus') url = `/admin/geo/wards/${id}/pus`;
+        }
+        try {
+            const res = await fetch(url);
+            if (res.ok) return await res.json();
+        } catch (e) {
+            console.error(`Failed to fetch ${type}`, e);
+        }
+        return [];
+    };
+
+    useEffect(() => {
+        fetchGeo('states').then(data => setGeoOptions(prev => ({ ...prev, states: data })));
+    }, [filters]);
+
+    const handleFilterChange = (key, value) => {
+        setFilters(prev => {
+            const next = { ...prev, [key]: value };
+            if (key === 'state') return { ...next, lga: '', ward: '', pu: '' };
+            if (key === 'lga') return { ...next, ward: '', pu: '' };
+            if (key === 'ward') return { ...next, pu: '' };
+            return next;
+        });
+
+        if (key === 'state') {
+            if (value) {
+                fetchGeo('lgas', value).then(data => setGeoOptions(prev => ({ ...prev, lgas: data, wards: [], pus: [] })));
+            } else {
+                setGeoOptions(prev => ({ ...prev, lgas: [], wards: [], pus: [] }));
+            }
+        }
+        if (key === 'lga') {
+            if (value) {
+                fetchGeo('wards', value).then(data => setGeoOptions(prev => ({ ...prev, wards: data, pus: [] })));
+            } else {
+                setGeoOptions(prev => ({ ...prev, wards: [], pus: [] }));
+            }
+        }
+        if (key === 'ward') {
+            if (value) {
+                fetchGeo('pus', value).then(data => setGeoOptions(prev => ({ ...prev, pus: data })));
+            } else {
+                setGeoOptions(prev => ({ ...prev, pus: [] }));
+            }
+        }
+    };
+
+
     useEffect(() => {
         const fetchData = async () => {
             try {
-                // Fetch stats (using the same admin endpoint for now as it's public-safe summary data)
-                const statsRes = await fetch('http://127.0.0.1:8001/admin/stats/collation');
+                // Fetch stats
+                const query = new URLSearchParams();
+                if (filters.state) query.append('state_id', filters.state);
+                if (filters.lga) query.append('lga_id', filters.lga);
+                if (filters.ward) query.append('ward_id', filters.ward);
+                if (filters.pu) query.append('pu_id', filters.pu);
+                const statsRes = await fetch(`/admin/stats/collation?${query.toString()}`);
                 if (statsRes.ok) {
                     const statsData = await statsRes.json();
                     setStats({
@@ -33,7 +94,7 @@ const PublicDashboard = () => {
                 }
 
                 // Fetch party names
-                const configRes = await fetch('http://127.0.0.1:8001/admin/election-config');
+                const configRes = await fetch('/admin/election-config');
                 if (configRes.ok) {
                     const configData = await configRes.json();
                     setPartyConfig(configData);
@@ -48,7 +109,7 @@ const PublicDashboard = () => {
         fetchData();
         const interval = setInterval(fetchData, 60000); // 60s refresh for public
         return () => clearInterval(interval);
-    }, []);
+    }, [filters]);
 
     const chartData = [
         { name: partyConfig.party_a_name, votes: stats.party_a, color: '#0D9488' },
@@ -69,6 +130,67 @@ const PublicDashboard = () => {
                     <ShieldCheck className="w-4 h-4 text-brand" />
                     <span className="text-[10px] font-bold text-gray-500 uppercase">Verified Results Only</span>
                 </div>
+            </div>
+
+            
+            {/* Hierarchy Filter Bar */}
+            <div className="bg-white dark:bg-gray-900 p-4 rounded-3xl border border-gray-100 dark:border-gray-800 shadow-sm flex flex-col gap-3">
+                <div className="flex items-center space-x-2 text-brand mb-1">
+                    <Map className="w-4 h-4" />
+                    <span className="text-[10px] font-black uppercase tracking-widest text-gray-400">Filter By Location</span>
+                </div>
+                
+                <div className="grid grid-cols-2 gap-3">
+                    <select
+                        value={filters.state}
+                        onChange={e => handleFilterChange('state', e.target.value)}
+                        className="w-full bg-gray-50 dark:bg-gray-800 border-none rounded-xl text-xs font-bold p-2.5 focus:ring-2 focus:ring-brand"
+                    >
+                        <option value="">All States</option>
+                        {geoOptions.states?.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                    </select>
+
+                    <select
+                        value={filters.lga}
+                        onChange={e => handleFilterChange('lga', e.target.value)}
+                        className="w-full bg-gray-50 dark:bg-gray-800 border-none rounded-xl text-xs font-bold p-2.5 focus:ring-2 focus:ring-brand disabled:opacity-50"
+                        disabled={!filters.state}
+                    >
+                        <option value="">All LGAs</option>
+                        {geoOptions.lgas?.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+                    </select>
+
+                    <select
+                        value={filters.ward}
+                        onChange={e => handleFilterChange('ward', e.target.value)}
+                        className="w-full bg-gray-50 dark:bg-gray-800 border-none rounded-xl text-xs font-bold p-2.5 focus:ring-2 focus:ring-brand disabled:opacity-50"
+                        disabled={!filters.lga}
+                    >
+                        <option value="">All Wards</option>
+                        {geoOptions.wards?.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
+                    </select>
+
+                    <select
+                        value={filters.pu}
+                        onChange={e => handleFilterChange('pu', e.target.value)}
+                        className="w-full bg-gray-50 dark:bg-gray-800 border-none rounded-xl text-xs font-bold p-2.5 focus:ring-2 focus:ring-brand disabled:opacity-50"
+                        disabled={!filters.ward}
+                    >
+                        <option value="">All PUs</option>
+                        {geoOptions.pus?.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                    </select>
+                </div>
+                {filters.state && (
+                    <button
+                        onClick={() => {
+                            setFilters({ state: '', lga: '', ward: '', pu: '' });
+                            setGeoOptions(prev => ({ ...prev, lgas: [], wards: [], pus: [] }));
+                        }}
+                        className="text-[9px] uppercase font-black text-gray-400 hover:text-brand transition-colors text-right mt-1"
+                    >
+                        Clear Filters
+                    </button>
+                )}
             </div>
 
             {/* Main Stats */}

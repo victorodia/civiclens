@@ -26,7 +26,7 @@ print("[HOT-RELOAD] Security Initialization Protocol Synchronized")
 # 2. Prevent Host Header Injection attacks
 app.add_middleware(
     TrustedHostMiddleware, 
-    allowed_hosts=["localhost", "127.0.0.1", "civiclens.io", "*.civiclens.io"]
+    allowed_hosts=["*"]
 )
 
 # 3. CORS Policies (Cross-Origin Resource Sharing)
@@ -73,6 +73,7 @@ from sqlalchemy import select as sa_select
 from app.db import get_db as _get_db
 from sqlalchemy.ext.asyncio import AsyncSession as _AsyncSession
 from fastapi import Depends as _Depends
+from app.security import RequirePermission
 
 class _ElectionConfigSchema(PydanticBase):
     party_a_name: str
@@ -94,7 +95,7 @@ async def get_election_config(db: _AsyncSession = _Depends(_get_db)):
     return {"party_a_name": config.party_a_name, "party_b_name": config.party_b_name, "party_c_name": config.party_c_name, "election_name": config.election_name}
 
 @app.put("/admin/election-config", tags=["Election Config"])
-async def update_election_config(payload: _ElectionConfigSchema, db: _AsyncSession = _Depends(_get_db)):
+async def update_election_config(payload: _ElectionConfigSchema, db: _AsyncSession = _Depends(_get_db), user = _Depends(RequirePermission("trigger_factory_reset"))):
     from app.models import ElectionConfig
     from datetime import datetime
     result = await db.execute(sa_select(ElectionConfig).where(ElectionConfig.id == "global"))

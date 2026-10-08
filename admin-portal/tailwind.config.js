@@ -7,6 +7,9 @@ export default {
     darkMode: 'class', // Enable toggling dark mode via class name
     theme: {
         extend: {
+            fontFamily: {
+                sans: ['"Plus Jakarta Sans"', 'sans-serif'],
+            },
             colors: {
                 // Civic Lens Brand Colors
                 brand: {

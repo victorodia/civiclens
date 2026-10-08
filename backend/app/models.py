@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Integer, Boolean, DateTime, ForeignKey, Text, Float
+from sqlalchemy import Column, String, Integer, Boolean, DateTime, ForeignKey, Text, Float, JSON
 from sqlalchemy.orm import relationship
 from .db import Base
 
@@ -33,6 +33,14 @@ class AuditLog(Base):
     ip_address = Column(String(45), nullable=True)
     timestamp = Column(DateTime, default=datetime.utcnow)
 
+
+class CustomRole(Base):
+    __tablename__ = "roles"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String(100), unique=True, nullable=False)
+    permissions = Column(JSON, default=list) # Array of permission strings
+    
 class User(Base):
     __tablename__ = "users"
 
@@ -138,3 +146,6 @@ class Result(Base):
     uploaded_at = Column(DateTime, default=datetime.utcnow) # The time it hit the server
 
 
+
+# Alias for backward compatibility
+Role = CustomRole

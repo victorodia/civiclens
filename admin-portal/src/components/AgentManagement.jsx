@@ -11,6 +11,7 @@ const AgentManagement = () => {
     const [newAgentEmail, setNewAgentEmail] = useState('');
     const [provisionedPwd, setProvisionedPwd] = useState(null);
     const [copied, setCopied] = useState(false);
+    const [selectedImage, setSelectedImage] = useState(null);
 
     // Revocation state is now handled by NotificationContext
     const [isRevoking, setIsRevoking] = useState(false);
@@ -40,7 +41,7 @@ const AgentManagement = () => {
 
     const fetchStates = async () => {
         try {
-            const res = await fetch('http://127.0.0.1:8001/admin/geo/states');
+            const res = await fetch('/admin/geo/states');
             if (res.ok) {
                 const data = await res.json();
                 setStates(Array.isArray(data) ? data : []);
@@ -57,7 +58,7 @@ const AgentManagement = () => {
         setLgas([]); setWards([]); setPus([]);
         if (!stateId) return;
         try {
-            const res = await fetch(`http://127.0.0.1:8001/admin/geo/states/${stateId}/lgas`);
+            const res = await fetch(`/admin/geo/states/${stateId}/lgas`);
             if (res.ok) {
                 const data = await res.json();
                 setLgas(Array.isArray(data) ? data : []);
@@ -71,7 +72,7 @@ const AgentManagement = () => {
         setWards([]); setPus([]);
         if (!lgaId) return;
         try {
-            const res = await fetch(`http://127.0.0.1:8001/admin/geo/lgas/${lgaId}/wards`);
+            const res = await fetch(`/admin/geo/lgas/${lgaId}/wards`);
             if (res.ok) {
                 const data = await res.json();
                 setWards(Array.isArray(data) ? data : []);
@@ -84,7 +85,7 @@ const AgentManagement = () => {
         setSelectedPu(''); setPus([]);
         if (!wardId) return;
         try {
-            const res = await fetch(`http://127.0.0.1:8001/admin/geo/wards/${wardId}/pus`);
+            const res = await fetch(`/admin/geo/wards/${wardId}/pus`);
             if (res.ok) {
                 const data = await res.json();
                 setPus(Array.isArray(data) ? data : []);
@@ -94,7 +95,7 @@ const AgentManagement = () => {
 
     const fetchAgents = async () => {
         try {
-            const res = await fetch('http://127.0.0.1:8001/admin/agents');
+            const res = await fetch('/admin/agents');
             if (!res.ok) throw new Error("Failed to load agents list");
             const data = await res.json();
             setAgents(Array.isArray(data) ? data : []);
@@ -113,7 +114,7 @@ const AgentManagement = () => {
         setProvisionedPwd(null);
 
         try {
-            const response = await fetch('http://127.0.0.1:8001/admin/provision-agents', {
+            const response = await fetch('/admin/provision-agents', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -159,7 +160,7 @@ const AgentManagement = () => {
         setIsRevoking(true);
 
         try {
-            const res = await fetch(`http://127.0.0.1:8001/admin/agents/${agentId}`, {
+            const res = await fetch(`/admin/agents/${agentId}`, {
                 method: 'DELETE',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ admin_password: password })
@@ -189,6 +190,33 @@ const AgentManagement = () => {
 
     return (
         <div className="space-y-6 animate-in fade-in duration-500 relative">
+
+            <AnimatePresence>
+                {selectedImage && (
+                    <motion.div 
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        onClick={() => setSelectedImage(null)}
+                        className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+                    >
+                        <motion.div 
+                            initial={{ scale: 0.9 }}
+                            animate={{ scale: 1 }}
+                            exit={{ scale: 0.9 }}
+                            className="relative max-w-2xl w-full"
+                        >
+                            <img src={selectedImage} alt="Agent Profile Enlarged" className="w-full rounded-2xl shadow-2xl border border-white/10" />
+                            <button 
+                                onClick={(e) => { e.stopPropagation(); setSelectedImage(null); }}
+                                className="absolute top-4 right-4 bg-black/50 hover:bg-black p-2 rounded-full text-white transition-colors"
+                            >
+                                <X className="w-6 h-6" />
+                            </button>
+                        </motion.div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
 
             {/* Provisioning Section */}
             <div className="bg-white dark:bg-gray-900 p-6 rounded-3xl border border-gray-100 dark:border-gray-800 shadow-xl">
@@ -310,8 +338,17 @@ const AgentManagement = () => {
                     {Array.isArray(agents) && agents.map(agent => (
                         <div key={agent.id} className="p-4 flex items-center justify-between hover:bg-gray-50 dark:hover:bg-gray-800/30 transition-colors">
                             <div className="flex items-center space-x-3">
-                                <div className="w-10 h-10 bg-brand/5 rounded-full flex items-center justify-center">
-                                    <Users className="w-5 h-5 text-brand" />
+                                <div className="w-10 h-10 bg-brand/5 rounded-full flex items-center justify-center overflow-hidden border border-gray-200 dark:border-gray-700">
+                                    {agent.profile_picture_path ? (
+                                        <img 
+                                            src={agent.profile_picture_path} 
+                                            alt="Profile" 
+                                            className="w-full h-full object-cover cursor-pointer hover:opacity-80 transition-opacity"
+                                            onClick={() => setSelectedImage(agent.profile_picture_path)}
+                                        />
+                                    ) : (
+                                        <Users className="w-5 h-5 text-brand" />
+                                    )}
                                 </div>
                                 <div>
                                     <p className="text-xs font-black text-gray-900 dark:text-white">{agent.email}</p>
