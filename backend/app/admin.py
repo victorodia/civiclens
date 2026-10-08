@@ -29,8 +29,10 @@ class TOTPVerifySchema(BaseModel):
     email: str
 
 @router.get("/mfa/setup")
-async def setup_mfa(email: str, db: AsyncSession = Depends(get_db)):
+async def setup_mfa(email: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
     """Generates a new TOTP secret and returns a provisioning URI (QR code)."""
+    if email.lower() != user.email.lower() and user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You may only manage your own MFA enrollment.")
     from .models import User
     result = await db.execute(select(User).where(User.email == email))
     user = result.scalars().first()
@@ -51,8 +53,10 @@ async def setup_mfa(email: str, db: AsyncSession = Depends(get_db)):
     }
 
 @router.post("/mfa/verify")
-async def verify_mfa(payload: TOTPVerifySchema, db: AsyncSession = Depends(get_db)):
+async def verify_mfa(payload: TOTPVerifySchema, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
     """Verifies a TOTP token to activate 2FA for an account."""
+    if payload.email.lower() != user.email.lower() and user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You may only manage your own MFA enrollment.")
     from .models import User
     result = await db.execute(select(User).where(User.email == payload.email))
     user = result.scalars().first()
@@ -69,7 +73,7 @@ async def verify_mfa(payload: TOTPVerifySchema, db: AsyncSession = Depends(get_d
         raise HTTPException(status_code=400, detail="Invalid or expired MFA token.")
 
 @router.post("/verify/{result_id}")
-async def approve_result(result_id: str, action: str, db: AsyncSession = Depends(get_db)):
+async def approve_result(result_id: str, action: str, db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("approve_results"))):
     """
     Final Human Verification: Admins can 'APPROVE' or 'REJECT' a result flagged by AI.
     If 'APPROVE', the result is marked as verified and the flag is cleared.
@@ -93,7 +97,7 @@ async def approve_result(result_id: str, action: str, db: AsyncSession = Depends
     # Audit this human verification event
     await log_audit(
         db, 
-        actor_id="ADMIN_SYSTEM", # Ideally, the current admin ID from JWT
+        actor_id=str(user.id),
         action=f"RESULT_{action.upper()}", 
         target_id=result_id,
         details=f"Human verification action: {action}"
@@ -113,7 +117,7 @@ class ProvisionSchema(BaseModel):
     polling_unit_id: str
 
 @router.post("/provision-agents")
-async def provision_new_agents(payload: ProvisionSchema, db: AsyncSession = Depends(get_db)):
+async def provision_new_agents(payload: ProvisionSchema, db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("provision_agents"))):
     """
     Super-Admin endpoint to bulk-create specific field agents bound to a PU.
     Commits them to the database with temporary credentials.
@@ -152,7 +156,7 @@ async def provision_new_agents(payload: ProvisionSchema, db: AsyncSession = Depe
 
 
 @router.get("/agents")
-async def get_all_agents(db: AsyncSession = Depends(get_db)):
+async def get_all_agents(db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("view_agents"))):
     """
     Returns a list of all provisioned field agents.
     """
@@ -173,7 +177,7 @@ async def get_all_agents(db: AsyncSession = Depends(get_db)):
     ]
 
 @router.get("/geo/states")
-async def get_states(db: AsyncSession = Depends(get_db)):
+async def get_states(db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("view_geographic_data"))):
     from sqlalchemy import select
     from .models import State
     res = await db.execute(select(State).order_by(State.name))
@@ -181,7 +185,7 @@ async def get_states(db: AsyncSession = Depends(get_db)):
     return [{"id": str(s.id), "name": s.name} for s in states]
 
 @router.get("/geo/states/{state_id}/lgas")
-async def get_lgas(state_id: str, db: AsyncSession = Depends(get_db)):
+async def get_lgas(state_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("view_geographic_data"))):
     from sqlalchemy import select
     from .models import LGA
     res = await db.execute(select(LGA).where(LGA.state_id == state_id).order_by(LGA.name))
@@ -189,7 +193,7 @@ async def get_lgas(state_id: str, db: AsyncSession = Depends(get_db)):
     return [{"id": str(l.id), "name": l.name} for l in lgas]
 
 @router.get("/geo/lgas/{lga_id}/wards")
-async def get_wards(lga_id: str, db: AsyncSession = Depends(get_db)):
+async def get_wards(lga_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("view_geographic_data"))):
     from sqlalchemy import select
     from .models import Ward
     res = await db.execute(select(Ward).where(Ward.lga_id == lga_id).order_by(Ward.name))
@@ -197,7 +201,7 @@ async def get_wards(lga_id: str, db: AsyncSession = Depends(get_db)):
     return [{"id": str(w.id), "name": w.name} for w in wards]
 
 @router.get("/geo/wards/{ward_id}/pus")
-async def get_pus(ward_id: str, db: AsyncSession = Depends(get_db)):
+async def get_pus(ward_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("view_geographic_data"))):
     from sqlalchemy import select
     from .models import PollingUnit
     res = await db.execute(select(PollingUnit).where(PollingUnit.ward_id == ward_id).order_by(PollingUnit.name))
@@ -210,7 +214,7 @@ class RevokeSchema(BaseModel):
     admin_password: str
 
 @router.delete("/agents/{agent_id}")
-async def revoke_agent(agent_id: str, payload: RevokeSchema, db: AsyncSession = Depends(get_db)):
+async def revoke_agent(agent_id: str, payload: RevokeSchema, db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("revoke_agents"))):
     """
     Secure Revocation: Requires administrative re-authentication.
     Purges an agent from the system, effectively killing their access.
@@ -218,26 +222,8 @@ async def revoke_agent(agent_id: str, payload: RevokeSchema, db: AsyncSession = 
     from .security import verify_password, get_current_user, RequirePermission
     from .models import User
     
-    # 1. Verify Administrative Re-authentication
-    # In a production system, we'd verify the password of the user currently logged in.
-    # For this MVP, we verify against any active administrator account.
-    admin_res = await db.execute(select(User).where(User.role == "admin"))
-    admins = admin_res.scalars().all()
-    
-    if not admins:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="System Error: No administrative profiles found in registry."
-        )
-
-    # Check if the password matches ANY admin (simplified for MVP)
-    authenticated = False
-    for admin in admins:
-        if verify_password(payload.admin_password, admin.hashed_password):
-            authenticated = True
-            break
-            
-    if not authenticated:
+    # 1. Verify Administrative Re-authentication against the authenticated caller.
+    if not verify_password(payload.admin_password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Administrative re-authentication failed. Incorrect security key."
@@ -260,7 +246,7 @@ async def revoke_agent(agent_id: str, payload: RevokeSchema, db: AsyncSession = 
     # Audit trail for personnel decommissioning
     await log_audit(
         db, 
-        actor_id="ADMIN_SYSTEM", 
+        actor_id=str(user.id),
         action="AGENT_REVOCATION", 
         target_id=agent_id,
         details=f"Access permanently revoked for agent: {agent.email}"
@@ -275,7 +261,7 @@ async def revoke_agent(agent_id: str, payload: RevokeSchema, db: AsyncSession = 
     }
 
 @router.post("/factory-reset")
-async def factory_reset_system(payload: RevokeSchema, db: AsyncSession = Depends(get_db)):
+async def factory_reset_system(payload: RevokeSchema, db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("trigger_factory_reset"))):
     """
     NUCLEAR OPTION: Purges all results and field agent accounts.
     Requires administrative re-authentication.
@@ -284,17 +270,8 @@ async def factory_reset_system(payload: RevokeSchema, db: AsyncSession = Depends
     from .models import User, Result
     from sqlalchemy import delete
 
-    # 1. Verify Administrative Re-authentication
-    admin_res = await db.execute(select(User).where(User.role == "admin"))
-    admins = admin_res.scalars().all()
-    
-    authenticated = False
-    for admin in admins:
-        if verify_password(payload.admin_password, admin.hashed_password):
-            authenticated = True
-            break
-            
-    if not authenticated:
+    # 1. Verify Administrative Re-authentication against the authenticated caller.
+    if not verify_password(payload.admin_password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Factory Reset Aborted: Incorrect administrative security key."
@@ -307,7 +284,7 @@ async def factory_reset_system(payload: RevokeSchema, db: AsyncSession = Depends
     # Audit before destruction
     await log_audit(
         db, 
-        actor_id="ADMIN_SYSTEM", 
+        actor_id=str(user.id),
         action="FACTORY_RESET", 
         details="Nuclear purgation of all results and agent accounts initiated."
     )
@@ -564,8 +541,15 @@ async def get_live_stats(
         "flagged_count": flagged_count
     }
 
+@router.get("/wallet-balance")
+async def get_wallet_balance(user: User = Depends(RequirePermission("view_live_telemetry"))):
+    """Polygon anchoring wallet status (address + POL balance) for the dashboard."""
+    from .polygon import get_wallet_status
+    return get_wallet_status()
+
+
 @router.get("/health")
-async def get_system_health(db: AsyncSession = Depends(get_db)):
+async def get_system_health(db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("view_live_telemetry"))):
     """Returns real-time telemetry on system health and node reporting."""
     from .models import State, Result, PollingUnit, Ward, LGA
     from sqlalchemy import func

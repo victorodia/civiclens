@@ -64,6 +64,12 @@ const SyncManager = ({ assignedPu }) => {
                 let uploadedVideoUrl = null;
                 let aiAnalysis = null;
 
+                const uploadToken = localStorage.getItem('cl_access_token');
+                const uploadHeaders = {
+                    'X-Device-Fingerprint': 'MOCKED_PHONE_ID',
+                    ...(uploadToken ? { 'Authorization': `Bearer ${uploadToken}` } : {})
+                };
+
                 // 1. Upload Image (if exists)
                 if (draft.image) {
                     console.log("Uploading image...");
@@ -71,6 +77,7 @@ const SyncManager = ({ assignedPu }) => {
                     imageFormData.append('file', draft.image);
                     const uploadResponse = await fetch('/upload/form-ec8a', {
                         method: 'POST',
+                        headers: uploadHeaders,
                         body: imageFormData
                     });
                     if (!uploadResponse.ok) {
@@ -91,6 +98,7 @@ const SyncManager = ({ assignedPu }) => {
                     videoFormData.append('file', draft.video);
                     const uploadResponse = await fetch('/upload/form-ec8a', {
                         method: 'POST',
+                        headers: uploadHeaders,
                         body: videoFormData
                     });
                     if (!uploadResponse.ok) {

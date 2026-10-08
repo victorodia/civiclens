@@ -131,9 +131,14 @@ const ResultCaptureForm = ({ assignedPu }) => {
             const payload = { email: assignedPu.email, latitude: coords.latitude, longitude: coords.longitude };
             console.log('[CHECK-IN] Payload:', JSON.stringify(payload));
             try {
+                const checkInToken = localStorage.getItem('cl_access_token');
                 const res = await fetch('/auth/agent/check-in', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Device-Fingerprint': 'MOCKED_PHONE_ID',
+                        ...(checkInToken ? { 'Authorization': `Bearer ${checkInToken}` } : {})
+                    },
                     body: JSON.stringify(payload)
                 });
                 const responseData = await res.json();

@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 
 from .db import get_db
-from .security import check_login_attempt, create_access_token, check_rate_limit
+from .security import check_login_attempt, create_access_token, check_rate_limit, get_current_user
 # from .models import User  # We would import this in a finalized system
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -149,23 +149,21 @@ class CheckInSchema(BaseModel):
     longitude: Optional[float] = None
 
 @router.post("/agent/check-in")
-async def agent_check_in(payload: CheckInSchema, db: AsyncSession = Depends(get_db)):
+async def agent_check_in(payload: CheckInSchema, db: AsyncSession = Depends(get_db), current_user = Depends(get_current_user)):
     """
     Electronic Muster Roll: Agents confirm physical arrival at the PU.
+    Identity comes from the JWT; the email in the payload is cross-checked only.
     """
     from datetime import datetime
-    from .models import User
-    from sqlalchemy import select
 
-    # DEBUG: Log incoming payload to trace GPS data
+    if current_user.role != "agent":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only field agents can check in.")
+    if payload.email.lower() != current_user.email.lower():
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Check-in identity does not match the authenticated agent.")
+
     print(f"[CHECK-IN] Received payload: email={payload.email}, lat={payload.latitude}, lng={payload.longitude}")
-    
-    result = await db.execute(select(User).where(User.email == payload.email))
-    user = result.scalars().first()
-    
-    if not user:
-        raise HTTPException(status_code=404, detail="Agent not found")
-        
+
+    user = current_user
     user.is_on_site = True
     user.last_check_in = datetime.utcnow()
     user.check_in_lat = payload.latitude
@@ -197,6 +195,11 @@ async def finalize_security_initialization(payload: SecurityInitializationSchema
     
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+
+    # 1.5 Close the bootstrap window: only accounts awaiting their first
+    # credential setup may use this endpoint.
+    if not user.requires_password_reset:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Security initialization is closed for this account.")
         
     # 2. Update credentials
     user.hashed_password = get_password_hash(payload.new_password)

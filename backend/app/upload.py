@@ -1,8 +1,13 @@
 import os
 import uuid
-from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, status
+from fastapi import APIRouter, UploadFile, File, Depends, Header, HTTPException, status
+from typing import Optional
+from sqlalchemy.ext.asyncio import AsyncSession
 # import boto3 (Assume integrated in production)
+from .db import get_db
 from .ocr_service import extract_votes_from_image
+from .models import User
+from .security import get_current_user, check_user_status
 
 router = APIRouter(prefix="/upload", tags=["Evidence Storage"])
 
@@ -13,17 +18,27 @@ router = APIRouter(prefix="/upload", tags=["Evidence Storage"])
 @router.post("/form-ec8a")
 async def secure_image_upload(
     file: UploadFile = File(...),
-    # db_session = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    agent: User = Depends(get_current_user),
+    x_device_fingerprint: Optional[str] = Header(None),
 ):
     """
     Receives heavily compressed client-side images.
-    Uploads them directly to an S3 bucket configured structurally for 
-    SSE-S3 (Server-Side Encryption) so images are encrypted at rest globally.
+    Evidence upload is restricted to authenticated, device-bound field agents;
+    the result-submission flow rejects any evidence URL it did not issue.
     """
-    
+
+    if agent.role != "agent":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only field agents may upload evidence.")
+    if not await check_user_status(str(agent.id), x_device_fingerprint, db):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access Denied: Agent account is inactive or device is unauthorized."
+        )
+
     if not (file.content_type.startswith("image/") or file.content_type.startswith("video/")):
         raise HTTPException(status_code=400, detail="Only image or video evidence is strictly permitted.")
-        
+
     unique_filename = f"{uuid.uuid4()}_{file.filename}"
     
     # Local Storage for development
@@ -52,4 +67,3 @@ async def secure_image_upload(
         "encryption": "LOCAL-DEV",
         "ai_analysis": ai_data
     }
-
