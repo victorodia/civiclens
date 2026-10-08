@@ -18,5 +18,5 @@ All new work happens on branch: hardening
 
 ## Known follow-ups (hardening branch)
 - Rotate POSTGRES_PASSWORD (old value exists in git history up to the baseline parent commit).
-- Rotate the Polygon wallet key in /civiclens/backend/.env (old copy, outside this repo).
+- Rotate the Polygon wallet key (archived from the old /civiclens copy: ~/backups/civiclens_old_root_copy_FULL.tar.gz).
 - Backend JWT fallback key and HMAC signing key are hardcoded in app/security.py.
