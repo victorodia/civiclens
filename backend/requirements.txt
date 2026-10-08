@@ -11,3 +11,5 @@ pytesseract
 Pillow
 aiofiles
 pyotp
+web3
+python-dotenv

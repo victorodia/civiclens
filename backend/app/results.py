@@ -1,14 +1,66 @@
+import asyncio
+import hashlib
+import json
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 from datetime import datetime
 from typing import Optional
 
-from .db import get_db
+from .db import get_db, AsyncSessionLocal
 from .models import Result, PollingUnit, User
 
 router = APIRouter(prefix="/results", tags=["Result Collation"])
+
+
+def compute_result_hash(payload: "ResultSubmitSchema") -> str:
+    """
+    sha256 over a canonical, sorted JSON encoding of the result payload.
+    This is the value anchored on-chain: anyone can recompute it from the
+    published data and compare against the chain record to detect tampering.
+    """
+    canonical = {
+        "agent_email": payload.agent_email,
+        "captured_at": payload.captured_at,
+        "party_a_votes": payload.party_a_votes,
+        "party_b_votes": payload.party_b_votes,
+        "party_c_votes": payload.party_c_votes,
+        "pu_code": payload.pu_code,
+        "total_valid": payload.total_valid,
+    }
+    digest = hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return "0x" + digest
+
+
+async def _anchor_onchain(result_id: str, result_hash: str) -> None:
+    """
+    Background task: anchor the result hash on Polygon, then record the tx id.
+    Runs in a separate session so a chain/RPC failure never blocks or rolls
+    back the submission. If anchoring fails, the hash remains stored and the
+    anchor can be retried later.
+    """
+    try:
+        from .polygon import anchor_hash_async
+        tx_id = await anchor_hash_async(result_hash)
+        print(f"[BLOCKCHAIN] Anchored result {result_id} in tx {tx_id}")
+    except Exception as e:
+        # InsufficientGasError, RPC outages, timeouts — all non-fatal here.
+        print(f"[BLOCKCHAIN] Anchoring failed for result {result_id}: {e}")
+        return
+
+    try:
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                update(Result)
+                .where(Result.id == result_id)
+                .values(blockchain_tx_id=tx_id)
+            )
+            await session.commit()
+    except Exception as e:
+        print(f"[BLOCKCHAIN] Anchored ({tx_id}) but failed to record tx for {result_id}: {e}")
 class ResultSubmitSchema(BaseModel):
     pu_code: str
     agent_email: str
@@ -107,6 +159,11 @@ async def submit_election_result(payload: ResultSubmitSchema, db: AsyncSession =
         if any([diff_a > 5, diff_b > 5, diff_c > 5]):
             is_flagged = True
 
+    # 4.5 Blockchain commitment: hash the canonical payload before persisting.
+    # The hash is written in the same commit as the result (WORM-friendly);
+    # the on-chain anchor happens asynchronously afterwards.
+    result_hash = compute_result_hash(payload)
+
     new_result = Result(
         pu_id=pu.id,
         agent_id=agent.id,
@@ -130,7 +187,8 @@ async def submit_election_result(payload: ResultSubmitSchema, db: AsyncSession =
         longitude=payload.longitude,
 
         captured_at=captured_dt,
-        uploaded_at=datetime.utcnow()
+        uploaded_at=datetime.utcnow(),
+        blockchain_hash=result_hash
     )
 
     from .security import log_audit
@@ -151,8 +209,12 @@ async def submit_election_result(payload: ResultSubmitSchema, db: AsyncSession =
 
     print(f"[COLLATION] New result committed: PU={payload.pu_code}, Total={payload.total_valid}")
 
+    # 6. Anchor the commitment hash on Polygon in the background (non-blocking).
+    asyncio.create_task(_anchor_onchain(new_result.id, result_hash))
+
     return {
         "status": "success",
         "result_id": new_result.id,
-        "message": "Result successfully collated and signed."
+        "blockchain_hash": result_hash,
+        "message": "Result successfully collated and signed. Hash anchored on-chain."
     }

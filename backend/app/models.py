@@ -145,6 +145,11 @@ class Result(Base):
     captured_at = Column(DateTime, nullable=False) # The actual time it was taken offline
     uploaded_at = Column(DateTime, default=datetime.utcnow) # The time it hit the server
 
+    # Blockchain Anchoring (Polygon) — sha256 of the canonical result payload;
+    # tx id recorded once the hash is anchored on-chain
+    blockchain_hash = Column(String(66), nullable=True)
+    blockchain_tx_id = Column(String(100), nullable=True)
+
 
 
 # Alias for backward compatibility
