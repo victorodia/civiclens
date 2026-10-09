@@ -57,6 +57,15 @@ const SyncManager = ({ assignedPu }) => {
         setSyncing(true);
         setError(null);
 
+        // Auth headers for every sync call: upload and submit alike.
+        // (Upload went without a token after the endpoint was locked down —
+        // the server rightly answered 401 "Not authenticated".)
+        const token = localStorage.getItem('cl_access_token');
+        const authHeaders = {
+            'X-Device-Fingerprint': 'MOCKED_PHONE_ID',
+            ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+        };
+
         for (const draft of pendingDrafts) {
             try {
                 console.log(`Syncing PU: ${draft.puCode}`);
@@ -71,6 +80,7 @@ const SyncManager = ({ assignedPu }) => {
                     imageFormData.append('file', draft.image);
                     const uploadResponse = await fetch('/upload/form-ec8a', {
                         method: 'POST',
+                        headers: authHeaders,
                         body: imageFormData
                     });
                     if (!uploadResponse.ok) {
@@ -91,6 +101,7 @@ const SyncManager = ({ assignedPu }) => {
                     videoFormData.append('file', draft.video);
                     const uploadResponse = await fetch('/upload/form-ec8a', {
                         method: 'POST',
+                        headers: authHeaders,
                         body: videoFormData
                     });
                     if (!uploadResponse.ok) {
@@ -130,13 +141,11 @@ const SyncManager = ({ assignedPu }) => {
                     signed_timestamp: draft.signedTimestamp
                 };
 
-                const token = localStorage.getItem('cl_access_token');
                 const submitResponse = await fetch('/results/submit', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
-                        'X-Device-Fingerprint': 'MOCKED_PHONE_ID',
-                        ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+                        ...authHeaders
                     },
                     body: JSON.stringify(resultPayload)
                 });
