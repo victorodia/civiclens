@@ -77,10 +77,20 @@ def get_wallet_status():
         return cached
 
     try:
-        web3 = Web3(Web3.HTTPProvider(RPC_URL, request_kwargs={"timeout": STATUS_TIMEOUT, **PROVIDER_KWARGS}))
+        # Raw JSON-RPC via requests: web3 v8 silently ignores
+        # HTTPProvider(request_kwargs=...), so only this gives us a hard cap.
+        import requests
         account = Account.from_key(PRIVATE_KEY)
-        balance_wei = web3.eth.get_balance(account.address)
-        balance_pol = float(web3.from_wei(balance_wei, 'ether'))
+        resp = requests.post(
+            RPC_URL,
+            json={"jsonrpc": "2.0", "method": "eth_getBalance",
+                  "params": [account.address, "latest"], "id": 1},
+            headers=PROVIDER_KWARGS["headers"],
+            timeout=STATUS_TIMEOUT,
+        )
+        resp.raise_for_status()
+        balance_wei = int(resp.json()["result"], 16)
+        balance_pol = balance_wei / 10**18
         result = {"address": account.address, "balance": balance_pol}
         _STATUS_CACHE.update(ts=now, value=result)
         return result
