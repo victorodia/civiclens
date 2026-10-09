@@ -11,7 +11,7 @@ PRIVATE_KEY = os.environ.get("POLYGON_PRIVATE_KEY")
 
 # Hard timeouts: a hanging public RPC must never kill a gunicorn worker.
 ANCHOR_TIMEOUT = 20     # seconds, for the background anchoring task
-STATUS_TIMEOUT = 8      # seconds, for the live dashboard balance probe
+STATUS_TIMEOUT = 6      # seconds, cache-miss refresh probe on the request path
 
 class InsufficientGasError(Exception):
     pass
@@ -60,17 +60,36 @@ async def anchor_hash_async(document_hash_hex: str) -> str:
     """
     return await asyncio.to_thread(sync_anchor_hash, document_hash_hex)
 
+# Balance answers are cacheable: the dashboard tolerates 2-minute staleness,
+# and this keeps public-RPC throttling (intermittent 10-30s responses) off
+# the request path entirely.
+_STATUS_CACHE = {"ts": 0.0, "value": None}
+STATUS_TTL = 120
+
 def get_wallet_status():
+    import time
     if not PRIVATE_KEY:
         return {"address": None, "balance": 0.0}
+
+    now = time.time()
+    cached = _STATUS_CACHE["value"]
+    if cached is not None and (now - _STATUS_CACHE["ts"]) < STATUS_TTL:
+        return cached
+
     try:
         web3 = Web3(Web3.HTTPProvider(RPC_URL, request_kwargs={"timeout": STATUS_TIMEOUT, **PROVIDER_KWARGS}))
         account = Account.from_key(PRIVATE_KEY)
         balance_wei = web3.eth.get_balance(account.address)
         balance_pol = float(web3.from_wei(balance_wei, 'ether'))
-        return {"address": account.address, "balance": balance_pol}
+        result = {"address": account.address, "balance": balance_pol}
+        _STATUS_CACHE.update(ts=now, value=result)
+        return result
     except Exception:
-        # RPC unreachable/misbehaving — never hang the dashboard worker.
+        # RPC unreachable/misbehaving — serve the last known good value, then zeros.
+        if cached is not None:
+            stale = dict(cached)
+            stale["stale"] = True
+            return stale
         try:
             address = Account.from_key(PRIVATE_KEY).address
         except Exception:
