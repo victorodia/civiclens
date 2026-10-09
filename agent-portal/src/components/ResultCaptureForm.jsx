@@ -131,14 +131,9 @@ const ResultCaptureForm = ({ assignedPu }) => {
             const payload = { email: assignedPu.email, latitude: coords.latitude, longitude: coords.longitude };
             console.log('[CHECK-IN] Payload:', JSON.stringify(payload));
             try {
-                const checkInToken = localStorage.getItem('cl_access_token');
                 const res = await fetch('/auth/agent/check-in', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-Device-Fingerprint': 'MOCKED_PHONE_ID',
-                        ...(checkInToken ? { 'Authorization': `Bearer ${checkInToken}` } : {})
-                    },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 });
                 const responseData = await res.json();
@@ -207,12 +202,19 @@ const ResultCaptureForm = ({ assignedPu }) => {
             }
 
             // SECURITY HARDENING: Payload Signing
-            // Generating HMAC-SHA256 to ensure data integrity during synchronization
+            // Generating HMAC-SHA256 to ensure data integrity during synchronization.
+            // Keyed with THIS agent's unique device signing key (issued at
+            // provisioning, entered at login) — the server rejects payloads
+            // signed with any other key.
             const payloadToSign = `${formData.puCode}|${formData.partyAVotes}|${formData.partyBVotes}|${formData.partyCVotes}`;
 
-            // In a production app, the key would be derived from the agent's unique device secret
+            const deviceKey = (localStorage.getItem('cl_signing_key') || '').trim();
+            if (!deviceKey) {
+                throw new Error("Device signing key missing. Re-login with the key issued at provisioning.");
+            }
+
             const encoder = new TextEncoder();
-            const keyData = encoder.encode("AGENT_DEVICE_SECRET_KEY"); // MOCK KEY
+            const keyData = encoder.encode(deviceKey);
             const cryptoKey = await crypto.subtle.importKey(
                 "raw", keyData, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
             );

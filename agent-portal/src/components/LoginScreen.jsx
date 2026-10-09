@@ -8,6 +8,7 @@ const LoginScreen = ({ onLoginSuccess, onRequireReset }) => {
     const { showNotification } = useNotification();
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
+    const [signingKey, setSigningKey] = useState('');
     const [showPassword, setShowPassword] = useState(false);
     const [loading, setLoading] = useState(false);
     const [captchaText, setCaptchaText] = useState('');
@@ -103,6 +104,10 @@ const LoginScreen = ({ onLoginSuccess, onRequireReset }) => {
             } else {
                 // Persist the JWT so offline drafts sync with authenticated identity
                 localStorage.setItem('cl_access_token', data.access_token);
+                // Persist the per-agent device signing key (issued at provisioning).
+                // Required to HMAC-sign result payloads; submissions are rejected
+                // server-side without a valid signature.
+                localStorage.setItem('cl_signing_key', signingKey.trim());
                 // Success - state elevated to Authenticated with PU context
                 onLoginSuccess(data.assigned_pu);
             }
@@ -167,6 +172,24 @@ const LoginScreen = ({ onLoginSuccess, onRequireReset }) => {
                                 {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
                             </button>
                         </div>
+                    </div>
+
+
+
+                    <div className="space-y-2">
+                        <label className="text-xs font-bold text-gray-700 dark:text-gray-400 uppercase tracking-wider ml-1">Device Signing Key</label>
+                        <div className="relative">
+                            <Shield className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+                            <input
+                                type="password"
+                                value={signingKey}
+                                onChange={(e) => setSigningKey(e.target.value)}
+                                className="w-full pl-12 pr-4 py-4 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-950 text-gray-900 dark:text-white focus:ring-2 focus:ring-brand outline-none transition-all placeholder:text-gray-400 dark:placeholder:text-gray-600 font-mono text-sm"
+                                placeholder="Issued at provisioning"
+                                required
+                            />
+                        </div>
+                        <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider ml-1">Signs result payloads — issued with your agent credentials</p>
                     </div>
 
 

@@ -101,21 +101,19 @@ import hmac
 import hashlib
 import base64
 
-def verify_payload_signature(payload_string: str, signature_b64: str) -> bool:
+def verify_payload_signature(payload_string: str, signature_b64: str, signing_key: str) -> bool:
     """
-    Verifies that the payload was signed by a trusted agent device.
-    Uses HMAC-SHA256 with a pre-shared secret key.
+    Verifies that the payload was signed by the specific agent's device.
+    Uses HMAC-SHA256 with the agent's unique pre-shared key (issued at
+    provisioning, stored on the user record). Constant-time comparison.
     """
-    # In production, keys should be unique per agent and stored in a HSM/Vault
-    # and derived during the provisioning phase.
-    SECRET_KEY_SIGNING = b"AGENT_DEVICE_SECRET_KEY" 
-    
+    if not signing_key:
+        return False
     try:
-        # Re-generate the expected signature
         message = payload_string.encode()
-        expected_signature = hmac.new(SECRET_KEY_SIGNING, message, hashlib.sha256).digest()
+        expected_signature = hmac.new(signing_key.encode(), message, hashlib.sha256).digest()
         expected_b64 = base64.b64encode(expected_signature).decode()
-        
+
         # Constant-time comparison to prevent timing attacks
         return hmac.compare_digest(expected_b64, signature_b64)
     except Exception as e:

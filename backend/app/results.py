@@ -113,25 +113,35 @@ async def submit_election_result(
     payload. Enforces device binding, PU accreditation, and WORM immutability.
     """
 
-    # 0. Signature Verification (Non-Repudiation Check)
+    # 0. Signature Verification (Non-Repudiation Check) — MANDATORY.
     # The signature is generated from: puCode|partyAVotes|partyBVotes|partyCVotes
+    # and HMAC-SHA256 keyed with the submitting agent's unique device signing
+    # key (issued at provisioning). The key is looked up from the JWT identity,
+    # never from the payload, so a stolen token on its own cannot forge sigs.
     payload_string = f"{payload.pu_code}|{payload.party_a_votes}|{payload.party_b_votes}|{payload.party_c_votes}"
 
     if not payload.signature:
         print(f"[SECURITY ALERT] Unsigned submission attempt for PU {payload.pu_code}")
-        # In a strict military-grade production, we'd raise 403.
-        # For this transition phase, we'll log it but proceed if the agent exists.
-        # UNCOMMENT THE BELOW LINE TO ENFORCE RIGID SIGNING
-        # raise HTTPException(status_code=403, detail="Payload Integrity Error: Missing Digital Signature.")
-    else:
-        is_valid = verify_payload_signature(payload_string, payload.signature)
-        if not is_valid:
-            print(f"[SECURITY ALERT] TAMPERING DETECTED: Signature mismatch for PU {payload.pu_code}")
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Payload Integrity Error: Digital Signature Mismatch. Data may have been tampered with."
-            )
-        print(f"[SECURITY] Signature Verified for PU {payload.pu_code}")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Payload Integrity Error: Missing Digital Signature."
+        )
+
+    signing_key = getattr(agent, "device_signing_key", None)
+    if not signing_key:
+        print(f"[SECURITY ALERT] Agent {agent.email} has no device signing key")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Device not fully provisioned: no signing key on record."
+        )
+
+    if not verify_payload_signature(payload_string, payload.signature, signing_key):
+        print(f"[SECURITY ALERT] TAMPERING DETECTED: Signature mismatch for PU {payload.pu_code}")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Payload Integrity Error: Digital Signature Mismatch. Data may have been tampered with."
+        )
+    print(f"[SECURITY] Signature Verified for PU {payload.pu_code}")
 
     # 1. Resolve PU
     pu_res = await db.execute(select(PollingUnit).where(PollingUnit.pu_code == payload.pu_code))

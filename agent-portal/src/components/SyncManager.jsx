@@ -64,12 +64,6 @@ const SyncManager = ({ assignedPu }) => {
                 let uploadedVideoUrl = null;
                 let aiAnalysis = null;
 
-                const uploadToken = localStorage.getItem('cl_access_token');
-                const uploadHeaders = {
-                    'X-Device-Fingerprint': 'MOCKED_PHONE_ID',
-                    ...(uploadToken ? { 'Authorization': `Bearer ${uploadToken}` } : {})
-                };
-
                 // 1. Upload Image (if exists)
                 if (draft.image) {
                     console.log("Uploading image...");
@@ -77,7 +71,6 @@ const SyncManager = ({ assignedPu }) => {
                     imageFormData.append('file', draft.image);
                     const uploadResponse = await fetch('/upload/form-ec8a', {
                         method: 'POST',
-                        headers: uploadHeaders,
                         body: imageFormData
                     });
                     if (!uploadResponse.ok) {
@@ -98,7 +91,6 @@ const SyncManager = ({ assignedPu }) => {
                     videoFormData.append('file', draft.video);
                     const uploadResponse = await fetch('/upload/form-ec8a', {
                         method: 'POST',
-                        headers: uploadHeaders,
                         body: videoFormData
                     });
                     if (!uploadResponse.ok) {
@@ -113,6 +105,11 @@ const SyncManager = ({ assignedPu }) => {
 
                 // 3. Upload Result Data
                 console.log("Submitting result data...");
+                if (!draft.signature) {
+                    // Drafts captured before per-agent signing existed cannot be
+                    // accepted by the server — fail loudly instead of retrying forever.
+                    throw new Error("Draft missing digital signature. Re-capture this result on the signed device.");
+                }
                 const resultPayload = {
                     pu_code: draft.puCode,
                     agent_email: draft.agentEmail || assignedPu?.email,
@@ -128,7 +125,9 @@ const SyncManager = ({ assignedPu }) => {
                     ai_confidence: aiAnalysis?.avg_confidence,
                     captured_at: draft.createdAt,
                     latitude: draft.location?.lat,
-                    longitude: draft.location?.lng
+                    longitude: draft.location?.lng,
+                    signature: draft.signature,
+                    signed_timestamp: draft.signedTimestamp
                 };
 
                 const token = localStorage.getItem('cl_access_token');

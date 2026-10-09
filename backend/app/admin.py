@@ -125,7 +125,7 @@ async def provision_new_agents(payload: ProvisionSchema, db: AsyncSession = Depe
     """
     results = {}
     alphabet = string.ascii_letters + string.digits
-    
+
     for email in payload.emails:
         # Check if already exists
         existing_res = await db.execute(select(User).where(User.email == email))
@@ -133,7 +133,10 @@ async def provision_new_agents(payload: ProvisionSchema, db: AsyncSession = Depe
             continue
 
         temp_pwd = "CIVIC_" + ''.join(secrets.choice(alphabet) for _ in range(8))
-        
+        # Per-agent HMAC signing key: the device needs it to sign result
+        # payloads; submissions without a valid signature are rejected.
+        signing_key = secrets.token_urlsafe(32)
+
         new_agent = User(
             email=email,
             full_name="Newly Provisioned Agent",
@@ -142,10 +145,11 @@ async def provision_new_agents(payload: ProvisionSchema, db: AsyncSession = Depe
             is_active=True,
             requires_password_reset=True,
             device_fingerprint="MOCKED_PHONE_ID",
+            device_signing_key=signing_key,
             assigned_pu_id=payload.polling_unit_id
         )
         db.add(new_agent)
-        results[email] = temp_pwd
+        results[email] = {"temp_password": temp_pwd, "signing_key": signing_key}
         
     await db.commit()
 

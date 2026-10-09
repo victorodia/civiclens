@@ -54,6 +54,7 @@ class User(Base):
     # Advanced Security Columns
     is_active = Column(Boolean, default=True)
     device_fingerprint = Column(String(255), nullable=True) # Binds the account to one specific mobile phone
+    device_signing_key = Column(String(64), nullable=True) # Per-agent HMAC key for payload signing (delivered at provisioning)
     is_2fa_enabled = Column(Boolean, default=False)
     totp_secret = Column(String(100), nullable=True)
     requires_password_reset = Column(Boolean, default=True) # Forces new agents to set a secure password immediately
