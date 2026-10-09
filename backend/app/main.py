@@ -5,7 +5,6 @@ from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
 
 from app.auth import router as auth_router
 from app.upload import router as upload_router
-from app.sms import router as sms_fallback_router
 from app.admin import router as admin_router
 from app.results import router as results_router
 from fastapi.staticfiles import StaticFiles
@@ -71,7 +70,6 @@ async def add_security_headers(request, call_next):
 # Register high-security routers
 app.include_router(auth_router)
 app.include_router(upload_router)
-app.include_router(sms_fallback_router)
 app.include_router(admin_router)
 app.include_router(results_router)
 
