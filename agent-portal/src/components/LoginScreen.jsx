@@ -8,7 +8,7 @@ const LoginScreen = ({ onLoginSuccess, onRequireReset }) => {
     const { showNotification } = useNotification();
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
-    const [signingKey, setSigningKey] = useState('');
+    const [signingKey, setSigningKey] = useState(() => localStorage.getItem('cl_signing_key') || '');
     const [showPassword, setShowPassword] = useState(false);
     const [loading, setLoading] = useState(false);
     const [captchaText, setCaptchaText] = useState('');

@@ -111,7 +111,7 @@ from pydantic import BaseModel
 import secrets
 import string
 from .models import User
-from .security import get_password_hash, get_current_user, RequirePermission
+from .security import get_password_hash, get_current_user, RequirePermission, log_audit
 
 class ProvisionSchema(BaseModel):
     emails: List[str]
@@ -180,6 +180,41 @@ async def get_all_agents(db: AsyncSession = Depends(get_db), user: User = Depend
         }
         for agent in agents
     ]
+
+
+class RotateKeySchema(BaseModel):
+    email: str
+
+@router.post("/agents/rotate-signing-key")
+async def rotate_agent_signing_key(payload: RotateKeySchema, db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("provision_agents"))):
+    """
+    Re-issue an agent's device signing key (lost key / suspected compromise).
+    The previous key stops working immediately. The new key is returned ONCE —
+    the operator must distribute it to the agent, who enters it at login.
+    """
+    res = await db.execute(select(User).where(User.email == payload.email, User.role == "agent"))
+    agent = res.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found.")
+
+    new_key = secrets.token_urlsafe(32)
+    agent.device_signing_key = new_key
+
+    await log_audit(
+        db,
+        actor_id=str(user.id),
+        action="AGENT_KEY_ROTATED",
+        target_id=str(agent.id),
+        details=f"Device signing key re-issued for {payload.email}"
+    )
+    await db.commit()
+
+    return {
+        "status": "success",
+        "email": payload.email,
+        "signing_key": new_key,
+        "message": "Previous key is now invalid. Distribute the new key to the agent."
+    }
 
 @router.get("/geo/states")
 async def get_states(db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("view_geographic_data"))):
