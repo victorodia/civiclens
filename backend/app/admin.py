@@ -6,7 +6,6 @@ from pydantic import BaseModel
 
 from .db import get_db
 from .verification import mock_ocr_analysis, verify_result_integrity
-from .polygon import get_wallet_status
 
 from .models import User, Role, CustomRole, State, LGA, Ward, PollingUnit, Result, ElectionConfig, AuditLog
 from .security import get_current_user, RequirePermission, log_audit, verify_password, get_password_hash
@@ -584,11 +583,17 @@ async def get_live_stats(
 @router.get("/wallet-balance")
 async def get_wallet_balance(user: User = Depends(RequirePermission("view_live_telemetry"))):
     """Polygon anchoring wallet status (address + POL balance) for the dashboard."""
-    # MUST run in a thread: the RPC probe can block up to STATUS_TIMEOUT.
-    # Blocking the event loop in an async route gets the uvicorn worker
-    # SIGKILLed by gunicorn (WORKER TIMEOUT -> gateway 502).
+    # The probe runs in a thread (RPC wait must never block the event loop),
+    # and the polygon module — which pulls in web3, a very heavy import — is
+    # loaded lazily inside that thread. A module-level import here stretched
+    # every gunicorn worker boot by minutes on this VM (full API outage on
+    # every recreate). First request after boot pays the import; after that
+    # the module is cached and answers come from the 120s balance cache.
     import asyncio
-    return await asyncio.to_thread(get_wallet_status)
+    def _status():
+        from .polygon import get_wallet_status
+        return get_wallet_status()
+    return await asyncio.to_thread(_status)
 
 
 @router.get("/health")
