@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from .db import get_db, AsyncSessionLocal
@@ -187,7 +187,11 @@ async def submit_election_result(
     # 4. Create Result
     try:
         captured_dt = datetime.fromisoformat(payload.captured_at.replace('Z', '+00:00'))
-    except:
+        # asyncpg/timestamp columns require naive UTC — portals send ISO strings
+        # with Z (offset-aware), which crashes the insert with
+        # "can't subtract offset-naive and offset-aware datetimes".
+        captured_dt = captured_dt.astimezone(timezone.utc).replace(tzinfo=None)
+    except Exception:
         captured_dt = datetime.utcnow()
 
     # AI Flagging Heuristic: Flag for human review if agent and AI numbers diverge
