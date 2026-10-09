@@ -30,6 +30,15 @@ export const getPendingDrafts = async (agentEmail) => {
 };
 
 /**
+ * Quarantine a draft that the server permanently rejects (e.g. signature
+ * mismatch): it leaves the pending list so auto-sync stops retrying it,
+ * but the data is preserved for the agent to re-capture from.
+ */
+export const updateDraftStatus = async (id, status) => {
+    return await db.drafts.update(id, { status });
+};
+
+/**
  * Clear a specific draft after successful sync
  */
 export const deleteDraft = async (id) => {

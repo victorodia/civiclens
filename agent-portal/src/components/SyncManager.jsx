@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { RefreshCw, Check, CloudUpload, AlertTriangle, QrCode, X } from 'lucide-react';
-import { getPendingDrafts, deleteDraft } from '../db/db';
+import { getPendingDrafts, deleteDraft, updateDraftStatus } from '../db/db';
 import QRScannerModal from './QRScannerModal';
 
 const SyncManager = ({ assignedPu }) => {
@@ -156,6 +156,16 @@ const SyncManager = ({ assignedPu }) => {
                     if (submitResponse.status === 401) {
                         // Token expired or revoked: force re-authentication on next sync
                         localStorage.removeItem('cl_access_token');
+                        throw new Error(errorData.detail || "Result submission failed");
+                    }
+                    if (submitResponse.status === 403) {
+                        // Permanent rejection (e.g. signature made with the wrong or
+                        // outdated signing key). Retrying can never succeed — quarantine
+                        // the draft so auto-sync stops hammering the server, keep the
+                        // data for re-capture, and move on to the next draft.
+                        await updateDraftStatus(draft.id, 'failed');
+                        setError(`PU ${draft.puCode} rejected (${errorData.detail || 'forbidden'}). Re-capture this result after logging in with the correct signing key.`);
+                        continue;
                     }
                     throw new Error(errorData.detail || "Result submission failed");
                 }

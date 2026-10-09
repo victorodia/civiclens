@@ -39,6 +39,11 @@ def _extract_votes_sync(image_bytes: bytes) -> Dict[str, any]:
         # Load image from bytes
         img = Image.open(io.BytesIO(image_bytes))
 
+        # Cap resolution before anything else: Tesseract gains nothing on form
+        # scans beyond ~1600px, and full-size phone photos (12MP+) are what
+        # OOM-killed a worker on this 1GB VM.
+        img.thumbnail((1600, 1600), Image.LANCZOS)
+
         # 1. PRE-PROCESSING FOR OCR
         # Convert to grayscale
         img = ImageOps.grayscale(img)
