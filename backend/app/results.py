@@ -52,6 +52,14 @@ def compute_result_hash(payload: "ResultSubmitSchema") -> str:
     return "0x" + digest
 
 
+def _anchor_sync(result_hash: str) -> str:
+    # The polygon module pulls in web3 (a ~30-60s CPU import). It MUST be
+    # imported inside the worker thread — an import on the event loop
+    # blocked a worker past gunicorn's timeout and got it SIGKILLed mid-submit.
+    from .polygon import sync_anchor_hash
+    return sync_anchor_hash(result_hash)
+
+
 async def _anchor_onchain(result_id: str, result_hash: str) -> None:
     """
     Background task: anchor the result hash on Polygon, then record the tx id.
@@ -60,8 +68,7 @@ async def _anchor_onchain(result_id: str, result_hash: str) -> None:
     anchor can be retried later.
     """
     try:
-        from .polygon import anchor_hash_async
-        tx_id = await anchor_hash_async(result_hash)
+        tx_id = await asyncio.to_thread(_anchor_sync, result_hash)
         print(f"[BLOCKCHAIN] Anchored result {result_id} in tx {tx_id}")
     except Exception as e:
         # InsufficientGasError, RPC outages, timeouts — all non-fatal here.
