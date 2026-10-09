@@ -23,16 +23,35 @@ print("[HOT-RELOAD] Security Initialization Protocol Synchronized")
 # Uncomment this in production to violently force HTTPS redirects
 # app.add_middleware(HTTPSRedirectMiddleware)
 
-# 2. Prevent Host Header Injection attacks
+# 2. Prevent Host Header Injection attacks.
+# Defaults cover the live gateway host; override with EXTRA_HOSTS=a,b,c
+ALLOWED_HOSTS = [
+    "193.122.220.182.nip.io",
+    "193.122.220.182",
+    "localhost",
+    "127.0.0.1",
+    "backend",  # intra-compose health probes
+] + [h.strip() for h in os.environ.get("EXTRA_HOSTS", "").split(",") if h.strip()]
+
 app.add_middleware(
-    TrustedHostMiddleware, 
-    allowed_hosts=["*"]
+    TrustedHostMiddleware,
+    allowed_hosts=ALLOWED_HOSTS
 )
 
 # 3. CORS Policies (Cross-Origin Resource Sharing)
+# All portals are served same-origin through the gateway, so the live API
+# only needs its own host. Local dev servers can be allow-listed via the
+# CORS_ORIGINS env var (comma-separated).
+CORS_ORIGINS = [
+    "https://193.122.220.182.nip.io",
+    "http://193.122.220.182.nip.io",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+] + [o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # In high-security prod, this would be specific subdomains
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

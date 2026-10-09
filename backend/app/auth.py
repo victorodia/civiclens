@@ -54,7 +54,6 @@ async def login(
     row = res.first()
     
     if not row:
-         print("[DEBUG AUTH] Row not found for email:", email)
          raise HTTPException(status_code=401, detail="Invalid credentials")
 
     user, pu, ward, lga, state = row
@@ -62,12 +61,8 @@ async def login(
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account has been deactivated. Contact the system administrator.")
 
-    print("[DEBUG AUTH] Found user:", user.email, "hashed_pwd:", user.hashed_password)
-    print("[DEBUG AUTH] Input password:", password)
-
     # 2. Device Fingerprinting Challenge
     if user.device_fingerprint and device_fingerprint != user.device_fingerprint:
-        print("[DEBUG AUTH] Device mismatch")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, 
             detail="Unrecognized Device."
@@ -79,10 +74,9 @@ async def login(
         user.hashed_password, 
         user.hashed_duress_password
     )
-    print("[DEBUG AUTH] is_authenticated:", is_authenticated)
     
     if not is_authenticated:
-        print("[DEBUG AUTH] check_login_attempt failed")
+        print(f"[AUTH] Failed login attempt for {email}")
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     # 3.5 MFA Challenge (TOTP)
