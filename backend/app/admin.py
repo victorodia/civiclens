@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 from .db import get_db
 from .verification import mock_ocr_analysis, verify_result_integrity
+from .polygon import get_wallet_status
 
 from .models import User, Role, CustomRole, State, LGA, Ward, PollingUnit, Result, ElectionConfig, AuditLog
 from .security import get_current_user, RequirePermission, log_audit, verify_password, get_password_hash
@@ -544,12 +545,10 @@ async def get_live_stats(
 @router.get("/wallet-balance")
 async def get_wallet_balance(user: User = Depends(RequirePermission("view_live_telemetry"))):
     """Polygon anchoring wallet status (address + POL balance) for the dashboard."""
-    # MUST run in a thread: this call can block (RPC probe up to STATUS_TIMEOUT,
-    # plus cold web3 import on first hit). Blocking the event loop in an
-    # async route gets the uvicorn worker SIGKILLed by gunicorn (WORKER TIMEOUT
-    # -> gateway 502), which is exactly the failure this guards against.
+    # MUST run in a thread: the RPC probe can block up to STATUS_TIMEOUT.
+    # Blocking the event loop in an async route gets the uvicorn worker
+    # SIGKILLed by gunicorn (WORKER TIMEOUT -> gateway 502).
     import asyncio
-    from .polygon import get_wallet_status
     return await asyncio.to_thread(get_wallet_status)
 
 
