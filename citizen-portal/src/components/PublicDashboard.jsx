@@ -23,11 +23,11 @@ const PublicDashboard = () => {
     const [geoOptions, setGeoOptions] = useState({ states: [], lgas: [], wards: [], pus: [] });
 
     const fetchGeo = async (type, id = null) => {
-        let url = `/admin/geo/${type}`;
+        let url = `/api/public/geo/${type}`;
         if (id) {
-            if (type === 'lgas') url = `/admin/geo/states/${id}/lgas`;
-            if (type === 'wards') url = `/admin/geo/lgas/${id}/wards`;
-            if (type === 'pus') url = `/admin/geo/wards/${id}/pus`;
+            if (type === 'lgas') url = `/api/public/geo/states/${id}/lgas`;
+            if (type === 'wards') url = `/api/public/geo/lgas/${id}/wards`;
+            if (type === 'pus') url = `/api/public/geo/wards/${id}/pus`;
         }
         try {
             const res = await fetch(url);
@@ -84,7 +84,7 @@ const PublicDashboard = () => {
                 if (filters.lga) query.append('lga_id', filters.lga);
                 if (filters.ward) query.append('ward_id', filters.ward);
                 if (filters.pu) query.append('pu_id', filters.pu);
-                const statsRes = await fetch(`/admin/stats/collation?${query.toString()}`);
+                const statsRes = await fetch(`/api/public/stats/collation?${query.toString()}`);
                 if (statsRes.ok) {
                     const statsData = await statsRes.json();
                     setStats({

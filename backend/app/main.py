@@ -7,6 +7,7 @@ from app.auth import router as auth_router
 from app.upload import router as upload_router
 from app.admin import router as admin_router
 from app.results import router as results_router
+from app.public import router as public_router
 from fastapi.staticfiles import StaticFiles
 import os
 
@@ -72,6 +73,7 @@ app.include_router(auth_router)
 app.include_router(upload_router)
 app.include_router(admin_router)
 app.include_router(results_router)
+app.include_router(public_router)
 
 # Mount Static Files for Evidence Visibility
 app.mount("/static", StaticFiles(directory=os.path.join(os.getcwd(), "app", "static")), name="static")
