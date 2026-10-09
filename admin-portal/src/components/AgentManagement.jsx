@@ -9,18 +9,18 @@ const AgentManagement = () => {
     const [isProvisioning, setIsProvisioning] = useState(false);
     const [isLoading, setIsLoading] = useState(true);
     const [newAgentEmail, setNewAgentEmail] = useState('');
-    const [provisionedPwd, setProvisionedPwd] = useState(null);
-    const [copied, setCopied] = useState(false);
+    const [provisionedCreds, setProvisionedCreds] = useState(null); // {password, signingKey}
+    const [copied, setCopied] = useState(null); // 'password' | 'signingKey'
     const [selectedImage, setSelectedImage] = useState(null);
 
     // Revocation state is now handled by NotificationContext
     const [isRevoking, setIsRevoking] = useState(false);
 
-    const handleCopy = () => {
-        if (!provisionedPwd) return;
-        navigator.clipboard.writeText(provisionedPwd);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
+    const handleCopy = (field) => {
+        if (!provisionedCreds?.[field]) return;
+        navigator.clipboard.writeText(provisionedCreds[field]);
+        setCopied(field);
+        setTimeout(() => setCopied(null), 2000);
     };
 
     // Geographic State
@@ -111,7 +111,7 @@ const AgentManagement = () => {
         e.preventDefault();
         if (!selectedPu) return showNotification("Please select a Polling Unit first.", "warning");
         setIsProvisioning(true);
-        setProvisionedPwd(null);
+        setProvisionedCreds(null);
 
         try {
             const response = await fetch('/admin/provision-agents', {
@@ -130,8 +130,16 @@ const AgentManagement = () => {
             }
 
             if (data?.provisioned && data.provisioned[newAgentEmail]) {
-                const tempPwd = data.provisioned[newAgentEmail];
-                setProvisionedPwd(tempPwd);
+                const entry = data.provisioned[newAgentEmail];
+                // Server returns {temp_password, signing_key}; tolerate the old
+                // plain-string shape so a stale backend doesn't white-screen us.
+                const creds = typeof entry === 'string'
+                    ? { password: entry, signingKey: null }
+                    : { password: entry.temp_password, signingKey: entry.signing_key };
+                if (!creds.password) {
+                    throw new Error("Credentials issued, but password not returned by server.");
+                }
+                setProvisionedCreds(creds);
 
                 setAgents(prev => [...prev, {
                     id: Date.now().toString(),
@@ -230,7 +238,7 @@ const AgentManagement = () => {
                     </div>
                 </div>
 
-                {!provisionedPwd ? (
+                {!provisionedCreds ? (
                     <form onSubmit={handleProvision} className="space-y-4">
                         <div className="grid grid-cols-2 gap-3">
                             <select
@@ -301,22 +309,43 @@ const AgentManagement = () => {
                             <CheckCircle className="w-5 h-5 text-green-600 mt-0.5" />
                             <div className="flex-1">
                                 <p className="text-sm font-black text-green-800 dark:text-green-400">Credentials Issued Successfully</p>
-                                <p className="text-[10px] text-green-600 font-bold mt-1 uppercase">Share this temporary password with the agent:</p>
-                                <div className="mt-3 bg-white dark:bg-gray-900 p-3 rounded-xl border border-green-200 dark:border-green-800 flex justify-between items-center group">
-                                    <code className="text-brand font-black tracking-widest">{provisionedPwd}</code>
-                                    <div className="flex items-center space-x-2">
-                                        <button
-                                            onClick={handleCopy}
-                                            className="p-1.5 text-gray-400 hover:text-brand transition-colors rounded-lg hover:bg-brand/5"
-                                            title="Copy to Clipboard"
-                                        >
-                                            {copied ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5" />}
-                                        </button>
-                                        <button
-                                            onClick={() => { setProvisionedPwd(null); setNewAgentEmail(''); }}
-                                            className="text-[10px] font-black text-gray-400 hover:text-brand uppercase px-2 py-1 rounded-lg hover:bg-brand/5"
-                                        > Done </button>
+                                <p className="text-[10px] text-green-600 font-bold mt-1 uppercase">Share BOTH the temporary password and the device signing key with the agent:</p>
+
+                                <div className="mt-3 bg-white dark:bg-gray-900 p-3 rounded-xl border border-green-200 dark:border-green-800 flex justify-between items-center gap-3">
+                                    <div className="min-w-0">
+                                        <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest">Temporary Password</p>
+                                        <code className="text-brand font-black tracking-widest break-all">{provisionedCreds.password}</code>
                                     </div>
+                                    <button
+                                        onClick={() => handleCopy('password')}
+                                        className="p-1.5 text-gray-400 hover:text-brand transition-colors rounded-lg hover:bg-brand/5 shrink-0"
+                                        title="Copy password"
+                                    >
+                                        {copied === 'password' ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5" />}
+                                    </button>
+                                </div>
+
+                                {provisionedCreds.signingKey && (
+                                    <div className="mt-2 bg-white dark:bg-gray-900 p-3 rounded-xl border border-green-200 dark:border-green-800 flex justify-between items-center gap-3">
+                                        <div className="min-w-0">
+                                            <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest">Device Signing Key</p>
+                                            <code className="text-brand font-black tracking-widest break-all text-xs">{provisionedCreds.signingKey}</code>
+                                        </div>
+                                        <button
+                                            onClick={() => handleCopy('signingKey')}
+                                            className="p-1.5 text-gray-400 hover:text-brand transition-colors rounded-lg hover:bg-brand/5 shrink-0"
+                                            title="Copy signing key"
+                                        >
+                                            {copied === 'signingKey' ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5" />}
+                                        </button>
+                                    </div>
+                                )}
+
+                                <div className="mt-3 flex justify-end">
+                                    <button
+                                        onClick={() => { setProvisionedCreds(null); setNewAgentEmail(''); }}
+                                        className="text-[10px] font-black text-gray-400 hover:text-brand uppercase px-2 py-1 rounded-lg hover:bg-brand/5"
+                                    > Done </button>
                                 </div>
                             </div>
                         </div>
