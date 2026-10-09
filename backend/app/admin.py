@@ -544,8 +544,13 @@ async def get_live_stats(
 @router.get("/wallet-balance")
 async def get_wallet_balance(user: User = Depends(RequirePermission("view_live_telemetry"))):
     """Polygon anchoring wallet status (address + POL balance) for the dashboard."""
+    # MUST run in a thread: this call can block (RPC probe up to STATUS_TIMEOUT,
+    # plus cold web3 import on first hit). Blocking the event loop in an
+    # async route gets the uvicorn worker SIGKILLed by gunicorn (WORKER TIMEOUT
+    # -> gateway 502), which is exactly the failure this guards against.
+    import asyncio
     from .polygon import get_wallet_status
-    return get_wallet_status()
+    return await asyncio.to_thread(get_wallet_status)
 
 
 @router.get("/health")
