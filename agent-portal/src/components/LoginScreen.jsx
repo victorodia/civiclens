@@ -99,15 +99,17 @@ const LoginScreen = ({ onLoginSuccess, onRequireReset }) => {
                 throw new Error('Unauthorized: This portal is restricted to Field Agents only.');
             }
 
+            // Persist the per-agent device signing key on ANY successful login —
+            // including the first one, which redirects to the forced password
+            // reset screen. (Previously it was only stored on the no-reset path,
+            // so freshly provisioned agents never got it pre-filled afterwards.)
+            localStorage.setItem('cl_signing_key', signingKey.trim());
+
             if (data.requires_password_reset) {
                 onRequireReset(email);
             } else {
                 // Persist the JWT so offline drafts sync with authenticated identity
                 localStorage.setItem('cl_access_token', data.access_token);
-                // Persist the per-agent device signing key (issued at provisioning).
-                // Required to HMAC-sign result payloads; submissions are rejected
-                // server-side without a valid signature.
-                localStorage.setItem('cl_signing_key', signingKey.trim());
                 // Success - state elevated to Authenticated with PU context
                 onLoginSuccess(data.assigned_pu);
             }
