@@ -183,6 +183,30 @@ async def submit_election_result(
             detail="You are not the accredited agent for this polling unit."
         )
 
+    # 2.7 Muster-Roll Gate: an agent must have "Verified Entry" (checked in)
+    # before results can be collated, and the check-in must still be fresh.
+    # Without this the check-in was cosmetic — submissions worked without it.
+    import os as _os
+    max_age_hours = float(_os.environ.get("CHECKIN_MAX_AGE_HOURS", "4"))
+    if not agent.is_on_site:
+        print(f"[SECURITY] Submission rejected: agent {agent.email} has not verified entry")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access Denied: You must Verify Entry at your polling unit before sending results."
+        )
+    if agent.last_check_in is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access Denied: No check-in on record. Verify Entry before sending results."
+        )
+    check_in_age = (datetime.utcnow() - agent.last_check_in).total_seconds() / 3600
+    if check_in_age > max_age_hours:
+        print(f"[SECURITY] Submission rejected: check-in stale ({check_in_age:.1f}h) for {agent.email}")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access Denied: Your entry verification has expired ({int(check_in_age)}h old). Verify Entry again before sending results."
+        )
+
     # 3. Check if result already exists for this PU
     existing_res = await db.execute(select(Result).where(Result.pu_id == pu.id))
     if existing_res.scalar_one_or_none():

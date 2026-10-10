@@ -748,3 +748,117 @@ async def delete_system_user(user_id: str, db: AsyncSession = Depends(get_db), _
     await db.delete(user)
     await db.commit()
     return {"status": "success"}
+
+def _public_evidence_url(url: Optional[str]) -> Optional[str]:
+    """
+    Uploads are stored with the backend's internal address
+    (http://127.0.0.1:8001/static/uploads/...). Browsers can't reach that,
+    so serve a same-origin relative path — the gateway already routes
+    /static to the backend.
+    """
+    if not url:
+        return url
+    marker = "/static/"
+    idx = url.find(marker)
+    if idx != -1:
+        return url[idx:]
+    return url
+
+@router.get("/all-documents")
+async def get_all_documents(
+    skip: int = 0,
+    limit: int = 50,
+    search: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(RequirePermission("view_results")),
+):
+    """
+    Document feed for the admin portal: every collated result with its
+    evidence, geography breakdown, and on-chain anchor. Paginated, searchable
+    by PU code/name, and filterable by upload date (YYYY-MM-DD).
+    """
+    from sqlalchemy import and_
+    from datetime import datetime as _dt
+
+    conditions = []
+    if search:
+        like = f"%{search}%"
+        conditions.append(
+            (PollingUnit.pu_code.ilike(like)) | (PollingUnit.name.ilike(like))
+        )
+    try:
+        if start_date:
+            conditions.append(Result.uploaded_at >= _dt.fromisoformat(start_date))
+        if end_date:
+            # inclusive of the whole end day
+            end = _dt.fromisoformat(end_date)
+            conditions.append(Result.uploaded_at < end.replace(hour=23, minute=59, second=59))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+
+    stmt = (
+        select(Result, PollingUnit, Ward, LGA, State)
+        .join(PollingUnit, Result.pu_id == PollingUnit.id)
+        .join(Ward, PollingUnit.ward_id == Ward.id, isouter=True)
+        .join(LGA, Ward.lga_id == LGA.id, isouter=True)
+        .join(State, LGA.state_id == State.id, isouter=True)
+    )
+    if conditions:
+        stmt = stmt.where(and_(*conditions))
+    stmt = stmt.order_by(Result.uploaded_at.desc()).offset(skip).limit(min(limit, 200))
+
+    res = await db.execute(stmt)
+    documents = []
+    for result, pu, ward, lga, state in res.all():
+        documents.append({
+            "id": result.id,
+            "image_url": _public_evidence_url(result.image_url),
+            "video_url": _public_evidence_url(result.video_url),
+            "pu_code": pu.pu_code if pu else None,
+            "pu_name": pu.name if pu else None,
+            "ward": ward.name if ward else None,
+            "lga": lga.name if lga else None,
+            "state": state.name if state else None,
+            "party_a": result.party_a_votes,
+            "party_b": result.party_b_votes,
+            "party_c": result.party_c_votes,
+            "uploaded_at": result.uploaded_at.isoformat() if result.uploaded_at else None,
+            "blockchain_hash": result.blockchain_hash,
+            "blockchain_tx_id": result.blockchain_tx_id,
+        })
+    return documents
+
+@router.get("/pending-verifications")
+async def get_pending_verifications(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(RequirePermission("view_results")),
+):
+    """
+    AI review queue: results the OCR flagged as diverging from the agent's
+    entered figures, not yet cleared by a human verifier.
+    """
+    stmt = (
+        select(Result, PollingUnit)
+        .join(PollingUnit, Result.pu_id == PollingUnit.id)
+        .where(Result.is_flagged.is_(True), Result.is_verified.is_(False))
+        .order_by(Result.uploaded_at.desc())
+    )
+    res = await db.execute(stmt)
+    queue = []
+    for result, pu in res.all():
+        queue.append({
+            "id": result.id,
+            "pu_code": pu.pu_code if pu else None,
+            "image_url": _public_evidence_url(result.image_url),
+            "party_a": result.party_a_votes,
+            "party_b": result.party_b_votes,
+            "party_c": result.party_c_votes,
+            "ai_party_a": result.ai_party_a_votes,
+            "ai_party_b": result.ai_party_b_votes,
+            "ai_party_c": result.ai_party_c_votes,
+            "ai_confidence": result.ai_confidence,
+            "captured_at": result.captured_at.isoformat() if result.captured_at else None,
+        })
+    return queue

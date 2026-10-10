@@ -157,6 +157,36 @@ async def agent_check_in(payload: CheckInSchema, db: AsyncSession = Depends(get_
 
     print(f"[CHECK-IN] Received payload: email={payload.email}, lat={payload.latitude}, lng={payload.longitude}")
 
+    # Geofence: when the assigned PU has anchor coordinates on record, the
+    # check-in GPS must be within GEOFENCE_RADIUS_METRES of them. Today no PU
+    # rows carry coordinates (0 of 44k), so this is inert until the registry
+    # is seeded — but it stops being a gap the moment anchors exist.
+    if current_user.assigned_pu_id and payload.latitude is not None and payload.longitude is not None:
+        from .models import PollingUnit
+        from sqlalchemy import select as _select
+        import math as _math
+        import os as _os
+        pu_res = await db.execute(_select(PollingUnit).where(PollingUnit.id == current_user.assigned_pu_id))
+        pu = pu_res.scalar_one_or_none()
+        if pu and pu.expected_latitude and pu.expected_longitude:
+            try:
+                anchor_lat, anchor_lng = float(pu.expected_latitude), float(pu.expected_longitude)
+            except (TypeError, ValueError):
+                anchor_lat = anchor_lng = None
+            if anchor_lat is not None:
+                radius = float(_os.environ.get("GEOFENCE_RADIUS_METRES", "200"))
+                rlat1, rlat2 = _math.radians(payload.latitude), _math.radians(anchor_lat)
+                dlat = _math.radians(anchor_lat - payload.latitude)
+                dlng = _math.radians(float(pu.expected_longitude) - payload.longitude)
+                a = _math.sin(dlat / 2) ** 2 + _math.cos(rlat1) * _math.cos(rlat2) * _math.sin(dlng / 2) ** 2
+                dist_m = 2 * 6371000 * _math.asin(_math.sqrt(a))
+                if dist_m > radius:
+                    print(f"[CHECK-IN] Rejected: {payload.email} is {dist_m:.0f}m from PU {pu.pu_code} anchor")
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail=f"Check-in rejected: you appear to be {int(dist_m)}m from your assigned polling unit. Move on-site and try again."
+                    )
+
     user = current_user
     user.is_on_site = True
     user.last_check_in = datetime.utcnow()

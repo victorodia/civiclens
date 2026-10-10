@@ -176,6 +176,15 @@ try:
     check("agent login -> JWT", bool(agent_tok), f"role={r.get('role')}")
     GH = {"Authorization": f"Bearer {agent_tok}", "X-Device-Fingerprint": FP}
 
+    # Muster-roll gate: a correctly signed submission must still be rejected
+    # before Verify Entry. Fresh temp agent -> is_on_site=False.
+    pre_sig = sign_payload(OCCUPIED_PU, 1, 1, 1, agent_signing_key)
+    st, r = call("POST", "/results/submit",
+                 {"pu_code": OCCUPIED_PU, "agent_email": AGENT_EMAIL, "party_a_votes": 1,
+                  "party_b_votes": 1, "party_c_votes": 1, "total_valid": 3,
+                  "captured_at": "2026-10-08T13:00:00Z", "signature": pre_sig}, headers=GH)
+    check("submit before verify-entry -> 403 muster gate", st == 403, f"got {st}")
+
     st, r = call("POST", "/auth/agent/check-in",
                  {"email": AGENT_EMAIL, "latitude": 6.33, "longitude": 5.60}, headers=GH)
     check("agent check-in self -> 200", st == 200, f"got {st}")
@@ -232,6 +241,17 @@ try:
                   "party_b_votes": 1, "party_c_votes": 1, "total_valid": 3,
                   "captured_at": "2026-10-08T13:00:00Z", "signature": new_key_sig}, headers=GH)
     check("re-issued key signature -> 409 WORM", st == 409, f"got {st}")
+
+    # ---------- admin document feed & AI review queue ----------
+    st, r = call("GET", "/admin/all-documents?skip=0&limit=5", headers=AH)
+    check("admin all-documents -> 200 list", st == 200 and isinstance(r, list), f"got {st}")
+    st, r = call("GET", "/admin/all-documents?search=DEL-03", headers=AH)
+    check("admin all-documents search -> filtered list", st == 200 and isinstance(r, list),
+          f"got {st}")
+    st, r = call("GET", "/admin/pending-verifications", headers=AH)
+    check("admin pending-verifications -> 200 list", st == 200 and isinstance(r, list), f"got {st}")
+    st, r = call("GET", "/admin/all-documents", headers=GH)
+    check("agent blocked from all-documents -> 403", st == 403, f"got {st}")
 
     print()
     print(f"RESULT: {len(passed)} passed, {len(failed)} failed")
