@@ -22,7 +22,7 @@ _symbols = "#!@$%*-_=+"
 ADMIN_PW = secrets.token_urlsafe(18) + secrets.choice(_symbols)
 AGENT_PW = secrets.token_urlsafe(18) + secrets.choice(_symbols)
 FP = "MOCKED_PHONE_ID"
-OCCUPIED_PU = "DEL-03-03-010"
+OCCUPIED_PU = "DEL-04-10-011"
 
 
 def sign_payload(pu_code, a, b, c, key):
@@ -154,7 +154,7 @@ try:
     check("geo/states admin -> 200", st == 200 and isinstance(r, list) and len(r) > 0,
           f"got {st} states={len(r) if isinstance(r, list) else 0}")
     st, r = call("POST", "/admin/provision-agents",
-                 {"emails": [AGENT_EMAIL], "polling_unit_id": "dbb990f1eef04496bf4f955e83e2ec40"},
+                 {"emails": [AGENT_EMAIL], "polling_unit_id": "cb4aefad-3f6d-581f-aff6-ab2754b9c2be"},
                  headers=AH)
     agent_signing_key = (r.get("provisioned") or {}).get(AGENT_EMAIL, {}).get("signing_key")
     check("provision-agents admin -> 200", st == 200 and bool(agent_signing_key), f"got {st} key={'yes' if agent_signing_key else 'NO'}")
