@@ -158,6 +158,23 @@ const AgentManagement = () => {
         }
     };
 
+    const handleRotateKey = async (agentEmail) => {
+        if (!window.confirm(`Re-issue the device signing key for ${agentEmail}?\n\nThe current key stops working IMMEDIATELY. The agent must enter the new key at their next login.`)) return;
+        try {
+            const res = await fetch('/admin/agents/rotate-signing-key', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email: agentEmail })
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || "Key re-issue failed");
+            // Reuse the credentials panel to show the new key once.
+            setProvisionedCreds({ password: null, signingKey: data.signing_key, email: agentEmail });
+        } catch (err) {
+            showNotification("Key Re-issue Error: " + err.message, "error");
+        }
+    };
+
     const handleRevoke = async (agentId) => {
         const password = await showDialog({
             title: "Revoke Agent Access",
@@ -308,9 +325,16 @@ const AgentManagement = () => {
                         <div className="flex items-start space-x-3">
                             <CheckCircle className="w-5 h-5 text-green-600 mt-0.5" />
                             <div className="flex-1">
-                                <p className="text-sm font-black text-green-800 dark:text-green-400">Credentials Issued Successfully</p>
-                                <p className="text-[10px] text-green-600 font-bold mt-1 uppercase">Share BOTH the temporary password and the device signing key with the agent:</p>
+                                <p className="text-sm font-black text-green-800 dark:text-green-400">
+                                    {provisionedCreds.password ? "Credentials Issued Successfully" : "New Signing Key Issued"}
+                                </p>
+                                <p className="text-[10px] text-green-600 font-bold mt-1 uppercase">
+                                    {provisionedCreds.password
+                                        ? "Share BOTH the temporary password and the device signing key with the agent:"
+                                        : `The previous key for ${provisionedCreds.email || 'this agent'} is now INVALID. Share the new device signing key with the agent:`}
+                                </p>
 
+                                {provisionedCreds.password && (
                                 <div className="mt-3 bg-white dark:bg-gray-900 p-3 rounded-xl border border-green-200 dark:border-green-800 flex justify-between items-center gap-3">
                                     <div className="min-w-0">
                                         <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest">Temporary Password</p>
@@ -324,6 +348,7 @@ const AgentManagement = () => {
                                         {copied === 'password' ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5" />}
                                     </button>
                                 </div>
+                                )}
 
                                 {provisionedCreds.signingKey && (
                                     <div className="mt-2 bg-white dark:bg-gray-900 p-3 rounded-xl border border-green-200 dark:border-green-800 flex justify-between items-center gap-3">
@@ -386,7 +411,13 @@ const AgentManagement = () => {
                             </div>
                             <div className="flex space-x-1">
                                 <button className="p-2 text-gray-400 hover:text-brand transition-colors"><Shield className="w-4 h-4" /></button>
-                                <button className="p-2 text-gray-400 hover:text-amber-500 transition-colors"><RefreshCw className="w-4 h-4" /></button>
+                                <button
+                                    onClick={() => handleRotateKey(agent.email)}
+                                    className="p-2 text-gray-400 hover:text-amber-500 transition-colors"
+                                    title="Re-issue Signing Key"
+                                >
+                                    <RefreshCw className="w-4 h-4" />
+                                </button>
                                 <button
                                     onClick={() => handleRevoke(agent.id)}
                                     className="p-2 text-gray-400 hover:text-red-500 transition-colors"
