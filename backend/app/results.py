@@ -207,6 +207,28 @@ async def submit_election_result(
             detail=f"Access Denied: Your entry verification has expired ({int(check_in_age)}h old). Verify Entry again before sending results."
         )
 
+    # 2.8 Presence-trail check (GPS breadcrumbs). The portal pings every
+    # PING_INTERVAL_MINUTES (default 30) between Verify Entry and submission.
+    # A thin trail FLAGS the result for the situation room — it never blocks:
+    # GPS drift, dead batteries and backgrounded apps make a hard gate unsafe.
+    ping_interval_h = float(_os.environ.get("PING_INTERVAL_MINUTES", "30")) / 60.0
+    hours_on_site = check_in_age  # computed by the freshness gate above
+    from .models import AgentLocationPing
+    pings_res = await db.execute(select(AgentLocationPing).where(
+        AgentLocationPing.agent_id == agent.id,
+        AgentLocationPing.recorded_at >= agent.last_check_in))
+    pings = pings_res.scalars().all()
+    expected = int(hours_on_site / ping_interval_h) if ping_interval_h > 0 else 0
+    required = max(0, expected - 1)  # one missed ping of grace
+    trail_ok = len(pings) >= required
+    if trail_ok and hours_on_site >= 1.5:
+        newest = max(p.recorded_at for p in pings) if pings else agent.last_check_in
+        trail_ok = (datetime.utcnow() - newest).total_seconds() <= 75 * 60
+    gps_trail_flag = not trail_ok
+    if gps_trail_flag:
+        print(f"[SECURITY] Thin GPS trail for {agent.email}: "
+              f"{len(pings)} pings in {hours_on_site:.1f}h (expected ~{expected})")
+
     # 3. Check if result already exists for this PU
     existing_res = await db.execute(select(Result).where(Result.pu_id == pu.id))
     if existing_res.scalar_one_or_none():
@@ -255,6 +277,7 @@ async def submit_election_result(
         ai_party_c_votes=payload.ai_party_c_votes,
         ai_confidence=payload.ai_confidence,
         is_flagged=is_flagged,
+        gps_trail_flag=gps_trail_flag,
 
         image_url=payload.image_url,
         video_url=payload.video_url,
@@ -284,7 +307,7 @@ async def submit_election_result(
         actor_id=agent.id,
         action="RESULT_SUBMISSION",
         target_id=new_result.id,
-        details=f"Result committed for PU {payload.pu_code}. Flagged={is_flagged}. Duress={is_under_duress}"
+        details=f"Result committed for PU {payload.pu_code}. Flagged={is_flagged}. Duress={is_under_duress}. GpsTrailFlag={gps_trail_flag}"
     )
 
     await db.commit()

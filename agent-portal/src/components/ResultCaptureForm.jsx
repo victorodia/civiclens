@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import imageCompression from 'browser-image-compression';
 import EXIF from 'exif-js';
 import { Camera, Upload, MapPin, CheckCircle, AlertCircle, Loader2, QrCode, Video, X } from 'lucide-react';
@@ -177,6 +177,82 @@ const ResultCaptureForm = ({ assignedPu }) => {
             sendCheckIn();
         }
     };
+
+    // ── Presence trail: GPS ping every 30 min between Verify Entry and ──
+    // submission. Proves the agent stayed at the PU. Silent by design —
+    // a failed ping cycle must never alarm the agent mid-operation.
+    const pingTimerRef = useRef(null);
+
+    const stopPingScheduler = () => {
+        if (pingTimerRef.current) {
+            clearTimeout(pingTimerRef.current);
+            pingTimerRef.current = null;
+        }
+    };
+
+    const sendLocationPing = async () => {
+        if (!assignedPu?.email) return null;
+        const getPos = (opts) => new Promise((resolve) => {
+            if (!navigator.geolocation) return resolve(null);
+            navigator.geolocation.getCurrentPosition(
+                (p) => resolve({ latitude: p.coords.latitude, longitude: p.coords.longitude }),
+                () => resolve(null),
+                opts
+            );
+        });
+        let coords = await getPos({ enableHighAccuracy: true, timeout: 8000 });
+        if (!coords) {
+            // Retry once with coarse/network location before giving up
+            coords = await getPos({ enableHighAccuracy: false, timeout: 15000, maximumAge: 120000 });
+        }
+        if (!coords) {
+            console.warn('[PING] GPS unavailable this cycle — trail gap recorded by absence');
+            return null;
+        }
+        try {
+            const token = localStorage.getItem('cl_access_token');
+            const res = await fetch('/auth/agent/location-ping', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Device-Fingerprint': 'MOCKED_PHONE_ID',
+                    ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+                },
+                body: JSON.stringify({ email: assignedPu.email, ...coords })
+            });
+            if (!res.ok) {
+                console.warn('[PING] rejected:', res.status, await res.text());
+                return null;
+            }
+            const data = await res.json();
+            return data.next_ping_in_minutes || 30;
+        } catch (e) {
+            console.warn('[PING] network error:', e);
+            return null;
+        }
+    };
+
+    const startPingScheduler = () => {
+        if (pingTimerRef.current) return; // already running
+        const tick = async () => {
+            const next = await sendLocationPing();
+            pingTimerRef.current = setTimeout(tick, (next || 30) * 60000);
+        };
+        tick(); // first ping immediately after verify-entry
+        showNotification("Presence trail active — location recorded every 30 minutes.", "info");
+    };
+
+    // Keep the trail alive while checked in and not yet submitted (covers
+    // page reloads: the scheduler restarts from is_on_site state). Stops the
+    // moment a result is submitted or the component unmounts.
+    useEffect(() => {
+        if (isCheckedIn && !success) {
+            startPingScheduler();
+        } else {
+            stopPingScheduler();
+        }
+        return stopPingScheduler;
+    }, [isCheckedIn, success]);
 
     const handleSubmit = async (e) => {
         e.preventDefault();

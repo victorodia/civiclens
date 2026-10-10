@@ -197,6 +197,68 @@ async def agent_check_in(payload: CheckInSchema, db: AsyncSession = Depends(get_
     print(f"[CHECK-IN] Persisted: lat={user.check_in_lat}, lng={user.check_in_lng}")
     return {"status": "success", "message": "Arrival confirmed. You are now ACTIVE on the muster roll."}
 
+
+class LocationPingSchema(BaseModel):
+    email: str
+    latitude: float
+    longitude: float
+
+@router.post("/agent/location-ping")
+async def agent_location_ping(payload: LocationPingSchema, db: AsyncSession = Depends(get_db), current_user = Depends(get_current_user)):
+    """
+    Presence-trail breadcrumb. Between Verify Entry and result submission the
+    portal posts the device GPS every PING_INTERVAL_MINUTES (default 30).
+    The ping is RECORDED, never rejected: drifting outside the geofence sets
+    a flag on the row instead of failing the request — a bad GPS fix must not
+    be able to break an honest agent's trail. At submission time the server
+    counts the pings and flags thin trails for the situation room.
+    """
+    from datetime import datetime
+    from .models import AgentLocationPing, PollingUnit
+    from sqlalchemy import select as _select
+    import math as _math
+    import os as _os
+
+    if current_user.role != "agent":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only field agents can send location pings.")
+    if payload.email.lower() != current_user.email.lower():
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Ping identity does not match the authenticated agent.")
+    if not current_user.assigned_pu_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No assigned polling unit on record.")
+
+    pu_res = await db.execute(_select(PollingUnit).where(PollingUnit.id == current_user.assigned_pu_id))
+    pu = pu_res.scalar_one_or_none()
+
+    outside, dist_m = False, None
+    if pu and pu.expected_latitude and pu.expected_longitude:
+        try:
+            anchor_lat, anchor_lng = float(pu.expected_latitude), float(pu.expected_longitude)
+            radius = float(_os.environ.get("GEOFENCE_RADIUS_METRES", "200"))
+            rlat1, rlat2 = _math.radians(payload.latitude), _math.radians(anchor_lat)
+            dlat = _math.radians(anchor_lat - payload.latitude)
+            dlng = _math.radians(anchor_lng - payload.longitude)
+            a = _math.sin(dlat / 2) ** 2 + _math.cos(rlat1) * _math.cos(rlat2) * _math.sin(dlng / 2) ** 2
+            dist_m = 2 * 6371000 * _math.asin(_math.sqrt(a))
+            outside = dist_m > radius
+        except (TypeError, ValueError):
+            pass  # unparseable anchors — record the ping without a verdict
+
+    ping = AgentLocationPing(
+        agent_id=current_user.id,
+        pu_id=current_user.assigned_pu_id,
+        latitude=payload.latitude,
+        longitude=payload.longitude,
+        outside_geofence=outside,
+        distance_m=dist_m,
+        recorded_at=datetime.utcnow(),
+    )
+    db.add(ping)
+    await db.commit()
+
+    interval = int(_os.environ.get("PING_INTERVAL_MINUTES", "30"))
+    return {"status": "success", "next_ping_in_minutes": interval}
+
+
 class SecurityInitializationSchema(BaseModel):
     email: str
     new_password: str

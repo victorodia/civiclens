@@ -75,6 +75,27 @@ app.include_router(admin_router)
 app.include_router(results_router)
 app.include_router(public_router)
 
+@app.on_event("startup")
+async def _ensure_schema():
+    """Create any missing tables/columns on boot (idempotent).
+
+    The agent_location_pings table and results.gps_trail_flag back the
+    presence-trail feature; create_all handles the table, and the ALTER ...
+    IF NOT EXISTS handles the column on the pre-existing results table.
+    """
+    from sqlalchemy import text
+    from app.db import Base, engine
+    from app import models  # noqa: F401 — register all mappings
+    async with engine.begin() as conn:
+        # Several gunicorn workers boot at once; the advisory lock makes the
+        # migration single-runner so they can't race table creation.
+        await conn.execute(text("SELECT pg_advisory_xact_lock(727272)"))
+        await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(text(
+            "ALTER TABLE results ADD COLUMN IF NOT EXISTS "
+            "gps_trail_flag BOOLEAN DEFAULT FALSE"))
+    print("[STARTUP] Schema check complete (incl. agent_location_pings)")
+
 # Mount Static Files for Evidence Visibility
 app.mount("/static", StaticFiles(directory=os.path.join(os.getcwd(), "app", "static")), name="static")
 

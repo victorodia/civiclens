@@ -142,6 +142,12 @@ class Result(Base):
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
 
+    # Presence trail: set when the agent had fewer GPS pings than expected
+    # between verify-entry and submission. FLAG ONLY — the result is still
+    # accepted; the situation room reviews flagged rows. (GPS drift, dead
+    # batteries and backgrounded apps make a hard block unsafe.)
+    gps_trail_flag = Column(Boolean, default=False)
+
     # Offline-First Timestamp capturing
     captured_at = Column(DateTime, nullable=False) # The actual time it was taken offline
     uploaded_at = Column(DateTime, default=datetime.utcnow) # The time it hit the server
@@ -155,3 +161,27 @@ class Result(Base):
 
 # Alias for backward compatibility
 Role = CustomRole
+
+
+class AgentLocationPing(Base):
+    """
+    Presence Trail (GPS breadcrumbs).
+    Between "Verify Entry" and result submission the agent portal transmits
+    the device coordinates every PING_INTERVAL_MINUTES (default 30). Rows are
+    append-only — nothing here is ever updated or deleted, so the trail is
+    tamper-evident the same way results are. At submission time the server
+    checks the trail and FLAGS (never blocks) a result whose agent has no
+    recent location evidence.
+    """
+    __tablename__ = "agent_location_pings"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    agent_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    pu_id = Column(String(36), ForeignKey("polling_units.id"), nullable=False, index=True)
+    latitude = Column(Float, nullable=False)
+    longitude = Column(Float, nullable=False)
+    # True when the ping landed outside the assigned PU's geofence radius
+    # (drift, indoor GPS, or the agent walked away) — recorded, not rejected.
+    outside_geofence = Column(Boolean, default=False)
+    distance_m = Column(Float, nullable=True)
+    recorded_at = Column(DateTime, default=datetime.utcnow, index=True)
