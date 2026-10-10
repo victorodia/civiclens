@@ -32,6 +32,7 @@ services:
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:?set JWT_SECRET_KEY in .env}
       - POLYGON_RPC_URL=${POLYGON_RPC_URL:?set POLYGON_RPC_URL in .env}
       - POLYGON_PRIVATE_KEY=${POLYGON_PRIVATE_KEY:?set POLYGON_PRIVATE_KEY in .env}
+      - GEOFENCE_RADIUS_METRES=${GEOFENCE_RADIUS_METRES:-400}
     depends_on:
       - db
       - redis
