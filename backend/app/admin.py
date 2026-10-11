@@ -109,12 +109,17 @@ async def approve_result(result_id: str, action: str, db: AsyncSession = Depends
 from pydantic import BaseModel
 import secrets
 import string
+import uuid
 from .models import User
 from .security import get_password_hash, get_current_user, RequirePermission, log_audit
 
 class ProvisionSchema(BaseModel):
     emails: List[str]
     polling_unit_id: str
+    # Optional: when set, the agents are accredited for this election (an
+    # agent_assignments row is created in addition to the legacy PU pointer),
+    # which is required for them to check in and submit in that election.
+    election_id: Optional[str] = None
 
 @router.post("/provision-agents")
 async def provision_new_agents(payload: ProvisionSchema, db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("provision_agents"))):
@@ -122,13 +127,44 @@ async def provision_new_agents(payload: ProvisionSchema, db: AsyncSession = Depe
     Super-Admin endpoint to bulk-create specific field agents bound to a PU.
     Commits them to the database with temporary credentials.
     """
+    from .models import Election, ElectionPU, AgentAssignment
+
+    # Validate election + PU scope up front (fail fast, before any insert)
+    election = None
+    if payload.election_id:
+        election = (await db.execute(select(Election).where(Election.id == payload.election_id))).scalar_one_or_none()
+        if not election:
+            raise HTTPException(404, "Election not found.")
+        in_scope = (await db.execute(select(ElectionPU).where(
+            ElectionPU.election_id == election.id,
+            ElectionPU.pu_id == payload.polling_unit_id))).scalar_one_or_none()
+        if not in_scope:
+            raise HTTPException(422, "This polling unit is outside the election's scope.")
+
     results = {}
     alphabet = string.ascii_letters + string.digits
 
     for email in payload.emails:
         # Check if already exists
         existing_res = await db.execute(select(User).where(User.email == email))
-        if existing_res.scalar_one_or_none():
+        existing_user = existing_res.scalar_one_or_none()
+        if existing_user:
+            # Already a user: just (re)accredit for this election if asked
+            if election:
+                clash = (await db.execute(select(AgentAssignment).where(
+                    AgentAssignment.election_id == election.id,
+                    AgentAssignment.pu_id == payload.polling_unit_id,
+                    AgentAssignment.agent_id != existing_user.id))).scalar_one_or_none()
+                if clash:
+                    results[email] = {"error": f"Another agent already covers this PU in {election.code}"}
+                    continue
+                have = (await db.execute(select(AgentAssignment).where(
+                    AgentAssignment.election_id == election.id,
+                    AgentAssignment.pu_id == payload.polling_unit_id,
+                    AgentAssignment.agent_id == existing_user.id))).scalar_one_or_none()
+                if not have:
+                    db.add(AgentAssignment(agent_id=existing_user.id, election_id=election.id,
+                                           pu_id=payload.polling_unit_id))
             continue
 
         temp_pwd = "CIVIC_" + ''.join(secrets.choice(alphabet) for _ in range(8))
@@ -137,6 +173,7 @@ async def provision_new_agents(payload: ProvisionSchema, db: AsyncSession = Depe
         signing_key = secrets.token_urlsafe(32)
 
         new_agent = User(
+            id=str(uuid.uuid4()),
             email=email,
             full_name="Newly Provisioned Agent",
             hashed_password=get_password_hash(temp_pwd),
@@ -148,11 +185,14 @@ async def provision_new_agents(payload: ProvisionSchema, db: AsyncSession = Depe
             assigned_pu_id=payload.polling_unit_id
         )
         db.add(new_agent)
+        if election:
+            db.add(AgentAssignment(agent_id=new_agent.id, election_id=election.id,
+                                   pu_id=payload.polling_unit_id))
         results[email] = {"temp_password": temp_pwd, "signing_key": signing_key}
-        
+
     await db.commit()
 
-    
+
     return {
         "status": "success",
         "provisioned": results
@@ -947,12 +987,13 @@ def _geofence_radius() -> float:
 
 # ── In-memory cache: the map query scans the registry, so serve fresh ──
 # data at most once every 30 seconds regardless of how many dashboards
-# are open in the situation room.
-_monitor_cache = {"at": 0.0, "payload": None}
+# are open in the situation room. Cached per election scope.
+_monitor_cache = {"at": 0.0, "payload": None, "by_election": {}}
 
 
 @router.get("/monitor/map")
 async def get_monitor_map(
+    election_id: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(RequirePermission("view_results")),
 ):
@@ -969,9 +1010,92 @@ async def get_monitor_map(
     from sqlalchemy import text as _text
 
     now = _time.time()
-    if _monitor_cache["payload"] and now - _monitor_cache["at"] < 30:
+    if election_id:
+        cached = _monitor_cache["by_election"].get(election_id)
+        if cached and now - cached["at"] < 30:
+            return cached["payload"]
+    elif _monitor_cache["payload"] and now - _monitor_cache["at"] < 30:
         return _monitor_cache["payload"]
 
+    if election_id:
+        # ── Election-scoped view: only PUs in this election's scope, agents
+        # accredited for this election, results and sessions of this race. ──
+        agent_rows = (await db.execute(_text("""
+            SELECT pu.pu_code, pu.name,
+                   pu.expected_latitude::float AS lat, pu.expected_longitude::float AS lng,
+                   (ci.id IS NOT NULL) AS is_on_site,
+                   ci.checked_in_at AS last_check_in,
+                   (r.id IS NOT NULL) AS submitted,
+                   lp.outside_geofence AS latest_outside
+            FROM election_polling_units sc
+            JOIN polling_units pu ON pu.id = sc.pu_id
+            JOIN agent_assignments a ON a.pu_id = pu.id AND a.election_id = sc.election_id
+            JOIN users u ON u.id = a.agent_id
+            LEFT JOIN results r ON r.pu_id = pu.id AND r.election_id = sc.election_id
+            LEFT JOIN LATERAL (
+                SELECT outside_geofence FROM agent_location_pings p
+                WHERE p.agent_id = u.id AND p.election_id = sc.election_id
+                ORDER BY recorded_at DESC LIMIT 1
+            ) lp ON true
+            LEFT JOIN LATERAL (
+                SELECT id, checked_in_at FROM agent_checkins c
+                WHERE c.agent_id = u.id AND c.election_id = sc.election_id AND c.is_active
+                ORDER BY checked_in_at DESC LIMIT 1
+            ) ci ON true
+            WHERE sc.election_id = :eid AND pu.expected_latitude IS NOT NULL
+        """), {"eid": election_id})).all()
+
+        markers = []
+        counters = {"assigned": 0, "on_site": 0, "out_of_fence": 0, "submitted": 0}
+        for pu_code, name, lat, lng, is_on_site, last_check_in, submitted, latest_outside in agent_rows:
+            if submitted:
+                status = "submitted"
+            elif not is_on_site or last_check_in is None:
+                status = "assigned"
+            elif latest_outside is True:
+                status = "out_of_fence"
+            else:
+                status = "on_site"
+            counters[status] += 1
+            markers.append({"pu_code": pu_code, "name": name, "lat": lat, "lng": lng,
+                            "status": status})
+
+        cluster_rows = (await db.execute(_text("""
+            SELECT s.name AS state, l.name AS lga,
+                   count(*) AS n,
+                   avg(pu.expected_latitude::float) AS lat,
+                   avg(pu.expected_longitude::float) AS lng
+            FROM election_polling_units sc
+            JOIN polling_units pu ON pu.id = sc.pu_id
+            JOIN wards w ON pu.ward_id = w.id
+            JOIN lgas l ON w.lga_id = l.id
+            JOIN states s ON l.state_id = s.id
+            LEFT JOIN agent_assignments a
+              ON a.pu_id = pu.id AND a.election_id = sc.election_id
+            WHERE sc.election_id = :eid AND a.id IS NULL AND pu.expected_latitude IS NOT NULL
+            GROUP BY s.name, l.name
+        """), {"eid": election_id})).all()
+        unassigned_clusters = [{"state": s, "lga": l, "count": n, "lat": lat, "lng": lng}
+                               for s, l, n, lat, lng in cluster_rows]
+        counters["unassigned"] = sum(c["count"] for c in unassigned_clusters)
+
+        no_coords = (await db.execute(_text(
+            "SELECT count(*) FROM election_polling_units sc "
+            "JOIN polling_units pu ON pu.id = sc.pu_id "
+            "WHERE sc.election_id = :eid AND pu.expected_latitude IS NULL"),
+            {"eid": election_id})).scalar()
+
+        payload = {
+            "generated_at": now,
+            "election_id": election_id,
+            "counters": {**counters, "no_coordinates": no_coords or 0},
+            "markers": markers,
+            "unassigned_clusters": unassigned_clusters,
+        }
+        _monitor_cache["by_election"][election_id] = {"at": now, "payload": payload}
+        return payload
+
+    # ── Unscoped (legacy) view: whole registry as before. ──
     # Agent-carrying PUs with live status
     agent_rows = (await db.execute(_text("""
         SELECT pu.pu_code, pu.name,

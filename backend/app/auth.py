@@ -114,7 +114,7 @@ async def login(
         is_compromised=is_under_duress
     )
 
-    # Geographic metadata for agents
+    # Geographic metadata for agents (legacy single-assignment shape)
     assigned_pu = None
     if pu:
         assigned_pu = {
@@ -128,12 +128,57 @@ async def login(
             "is_on_site": user.is_on_site
         }
 
+    # Election-scoped assignments: one entry per (election, PU) the agent is
+    # accredited for, with the per-election muster-roll state. The agent app
+    # renders its verify-entry picker and result form from this list, so the
+    # agent never free-types which election they are reporting for.
+    assignments = []
+    if user.role == "agent":
+        from .models import AgentAssignment, Election, AgentCheckIn
+        a_rows = (await db.execute(
+            select(AgentAssignment, Election, PollingUnit, Ward, LGA, State)
+            .join(Election, AgentAssignment.election_id == Election.id)
+            .join(PollingUnit, AgentAssignment.pu_id == PollingUnit.id)
+            .join(Ward, PollingUnit.ward_id == Ward.id, isouter=True)
+            .join(LGA, Ward.lga_id == LGA.id, isouter=True)
+            .join(State, LGA.state_id == State.id, isouter=True)
+            .where(AgentAssignment.agent_id == user.id)
+        )).all()
+        ci_rows = (await db.execute(
+            select(AgentCheckIn.election_id, func.max(AgentCheckIn.checked_in_at))
+            .where(AgentCheckIn.agent_id == user.id, AgentCheckIn.is_active == True)
+            .group_by(AgentCheckIn.election_id)
+        )).all()
+        on_site_by_election = {eid: ts for eid, ts in ci_rows}
+        for a, el, apu, award, alga, astate in a_rows:
+            assignments.append({
+                "election_id": el.id,
+                "election_name": el.name,
+                "election_code": el.code,
+                "election_type": el.type,
+                "election_status": el.status,
+                "party_a_name": el.party_a_name,
+                "party_b_name": el.party_b_name,
+                "party_c_name": el.party_c_name,
+                "pu": {
+                    "id": apu.id,
+                    "pu_code": apu.pu_code,
+                    "name": apu.name,
+                    "ward": award.name if award else "Unknown",
+                    "lga": alga.name if alga else "Unknown",
+                    "state": astate.name if astate else "Unknown",
+                },
+                "is_on_site": el.id in on_site_by_election,
+                "checked_in_at": on_site_by_election[el.id].isoformat() if el.id in on_site_by_election else None,
+            })
+
     return {
         "access_token": access_token, 
         "token_type": "bearer",
         "role": user.role,
         "requires_password_reset": False,
         "assigned_pu": assigned_pu,
+        "assignments": assignments,
         "notice": "Login Successful."
     }
 
@@ -141,34 +186,70 @@ class CheckInSchema(BaseModel):
     email: str
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+    # Election being checked in for. The agent picks this ONCE at verify-entry
+    # (from their assignment list) and the resulting session binds every later
+    # ping and the final submission to this election. Optional only for legacy
+    # apps: when absent, the default election and legacy PU pointer apply.
+    election_id: Optional[str] = None
 
 @router.post("/agent/check-in")
 async def agent_check_in(payload: CheckInSchema, db: AsyncSession = Depends(get_db), current_user = Depends(get_current_user)):
     """
-    Electronic Muster Roll: Agents confirm physical arrival at the PU.
-    Identity comes from the JWT; the email in the payload is cross-checked only.
+    Electronic Muster Roll, scoped per election: agents confirm physical
+    arrival at the PU FOR A SPECIFIC ELECTION. The check-in opens a session
+    (agent_checkins row) that the submission endpoint later requires — so an
+    agent verified for the Delta senatorial race cannot submit a governorship
+    result, and vice versa.
     """
     from datetime import datetime
+    from .models import AgentAssignment, AgentCheckIn, Election, PollingUnit
+    from sqlalchemy import select as _select
+    from sqlalchemy import text
 
     if current_user.role != "agent":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only field agents can check in.")
     if payload.email.lower() != current_user.email.lower():
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Check-in identity does not match the authenticated agent.")
 
-    print(f"[CHECK-IN] Received payload: email={payload.email}, lat={payload.latitude}, lng={payload.longitude}")
+    print(f"[CHECK-IN] Received payload: email={payload.email}, lat={payload.latitude}, lng={payload.longitude}, election={payload.election_id}")
+
+    # Resolve the election + PU for this check-in.
+    assignment = None
+    election = None
+    if payload.election_id:
+        assignment = (await db.execute(_select(AgentAssignment).where(
+            AgentAssignment.agent_id == current_user.id,
+            AgentAssignment.election_id == payload.election_id,
+        ))).scalar_one_or_none()
+        if not assignment:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You are not accredited for this election. Contact your coordinator."
+            )
+        election = (await db.execute(_select(Election).where(Election.id == payload.election_id))).scalar_one_or_none()
+        assigned_pu_id = assignment.pu_id
+    else:
+        # Legacy fallback: default election + the user-row PU pointer.
+        election = (await db.execute(_select(Election).where(Election.code == "GENERAL"))).scalar_one_or_none()
+        assigned_pu_id = current_user.assigned_pu_id
+        if election and assigned_pu_id:
+            assignment = (await db.execute(_select(AgentAssignment).where(
+                AgentAssignment.agent_id == current_user.id,
+                AgentAssignment.election_id == election.id,
+                AgentAssignment.pu_id == assigned_pu_id,
+            ))).scalar_one_or_none()
+        if not assigned_pu_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No assigned polling unit on record.")
+
+    pu_res = await db.execute(_select(PollingUnit).where(PollingUnit.id == assigned_pu_id))
+    pu = pu_res.scalar_one_or_none()
 
     # Geofence: when the assigned PU has anchor coordinates on record, the
-    # check-in GPS must be within GEOFENCE_RADIUS_METRES of them. Today no PU
-    # rows carry coordinates (0 of 44k), so this is inert until the registry
-    # is seeded — but it stops being a gap the moment anchors exist.
-    if current_user.assigned_pu_id and payload.latitude is not None and payload.longitude is not None:
-        from .models import PollingUnit
-        from sqlalchemy import select as _select
+    # check-in GPS must be within GEOFENCE_RADIUS_METRES of them.
+    if pu and payload.latitude is not None and payload.longitude is not None:
         import math as _math
         import os as _os
-        pu_res = await db.execute(_select(PollingUnit).where(PollingUnit.id == current_user.assigned_pu_id))
-        pu = pu_res.scalar_one_or_none()
-        if pu and pu.expected_latitude and pu.expected_longitude:
+        if pu.expected_latitude and pu.expected_longitude:
             try:
                 anchor_lat, anchor_lng = float(pu.expected_latitude), float(pu.expected_longitude)
             except (TypeError, ValueError):
@@ -187,34 +268,56 @@ async def agent_check_in(payload: CheckInSchema, db: AsyncSession = Depends(get_
                         detail=f"Check-in rejected: you appear to be {int(dist_m)}m from your assigned polling unit. Move on-site and try again."
                     )
 
+    # Open a fresh per-election session (the old one, if any, is closed).
+    if election:
+        await db.execute(
+            text("UPDATE agent_checkins SET is_active = false "
+                 "WHERE agent_id = :a AND election_id = :e AND is_active = true"),
+            {"a": str(current_user.id), "e": election.id},
+        )
+        db.add(AgentCheckIn(
+            agent_id=current_user.id,
+            election_id=election.id,
+            pu_id=assigned_pu_id,
+            checked_in_at=datetime.utcnow(),
+            latitude=payload.latitude,
+            longitude=payload.longitude,
+            is_active=True,
+        ))
+
+    # Keep the legacy user-row flags in sync so older admin views keep working.
     user = current_user
     user.is_on_site = True
     user.last_check_in = datetime.utcnow()
     user.check_in_lat = payload.latitude
     user.check_in_lng = payload.longitude
     await db.commit()
-    
-    print(f"[CHECK-IN] Persisted: lat={user.check_in_lat}, lng={user.check_in_lng}")
-    return {"status": "success", "message": "Arrival confirmed. You are now ACTIVE on the muster roll."}
+
+    print(f"[CHECK-IN] Persisted: lat={user.check_in_lat}, lng={user.check_in_lng}, election={election.code if election else 'legacy'}")
+    return {"status": "success", "election_id": election.id if election else None,
+            "message": f"Arrival confirmed for {election.name if election else 'your assignment'}. You are now ACTIVE on the muster roll."}
 
 
 class LocationPingSchema(BaseModel):
     email: str
     latitude: float
     longitude: float
+    # Election context for the breadcrumb. Legacy apps may omit it; the ping
+    # then attaches to the default election via the legacy PU pointer.
+    election_id: Optional[str] = None
 
 @router.post("/agent/location-ping")
 async def agent_location_ping(payload: LocationPingSchema, db: AsyncSession = Depends(get_db), current_user = Depends(get_current_user)):
     """
-    Presence-trail breadcrumb. Between Verify Entry and result submission the
-    portal posts the device GPS every PING_INTERVAL_MINUTES (default 30).
-    The ping is RECORDED, never rejected: drifting outside the geofence sets
-    a flag on the row instead of failing the request — a bad GPS fix must not
-    be able to break an honest agent's trail. At submission time the server
-    counts the pings and flags thin trails for the situation room.
+    Presence-trail breadcrumb, scoped to the election the agent declared at
+    verify-entry. Between "Verify Entry" and result submission the portal
+    posts the device GPS every PING_INTERVAL_MINUTES (default 30). The ping
+    is RECORDED, never rejected: drifting outside the geofence sets a flag on
+    the row instead of failing the request. At submission time the server
+    counts the pings FOR THAT ELECTION and flags thin trails.
     """
     from datetime import datetime
-    from .models import AgentLocationPing, PollingUnit
+    from .models import AgentLocationPing, PollingUnit, AgentAssignment, Election
     from sqlalchemy import select as _select
     import math as _math
     import os as _os
@@ -223,10 +326,28 @@ async def agent_location_ping(payload: LocationPingSchema, db: AsyncSession = De
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only field agents can send location pings.")
     if payload.email.lower() != current_user.email.lower():
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Ping identity does not match the authenticated agent.")
-    if not current_user.assigned_pu_id:
+
+    # Resolve the PU (and election) for this ping from the agent's assignment.
+    election_id = None
+    if payload.election_id:
+        assignment = (await db.execute(_select(AgentAssignment).where(
+            AgentAssignment.agent_id == current_user.id,
+            AgentAssignment.election_id == payload.election_id,
+        ))).scalar_one_or_none()
+        if not assignment:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                                detail="No assignment on record for this election.")
+        election_id = payload.election_id
+        assigned_pu_id = assignment.pu_id
+    else:
+        election = (await db.execute(_select(Election).where(Election.code == "GENERAL"))).scalar_one_or_none()
+        election_id = election.id if election else None
+        assigned_pu_id = current_user.assigned_pu_id
+
+    if not assigned_pu_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No assigned polling unit on record.")
 
-    pu_res = await db.execute(_select(PollingUnit).where(PollingUnit.id == current_user.assigned_pu_id))
+    pu_res = await db.execute(_select(PollingUnit).where(PollingUnit.id == assigned_pu_id))
     pu = pu_res.scalar_one_or_none()
 
     outside, dist_m = False, None
@@ -245,7 +366,8 @@ async def agent_location_ping(payload: LocationPingSchema, db: AsyncSession = De
 
     ping = AgentLocationPing(
         agent_id=current_user.id,
-        pu_id=current_user.assigned_pu_id,
+        pu_id=assigned_pu_id,
+        election_id=election_id,
         latitude=payload.latitude,
         longitude=payload.longitude,
         outside_geofence=outside,

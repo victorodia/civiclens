@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Integer, Boolean, DateTime, ForeignKey, Text, Float, JSON
+from sqlalchemy import Column, String, Integer, Boolean, DateTime, ForeignKey, Text, Float, JSON, UniqueConstraint
 from sqlalchemy.orm import relationship
 from .db import Base
 
@@ -111,11 +111,17 @@ class Result(Base):
     """
     Core Election Result Payload. 
     WORM logic implies updating this row is functionally prevented at the application tier once submitted.
+    Scoped per election: one result per (polling unit, election) — the same PU
+    can report independently for a governorship and a senatorial race.
     """
     __tablename__ = "results"
+    __table_args__ = (
+        UniqueConstraint("pu_id", "election_id", name="uq_result_pu_election"),
+    )
     
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    pu_id = Column(String(36), ForeignKey("polling_units.id"), unique=True) # 1 PU = 1 Result record strictly
+    pu_id = Column(String(36), ForeignKey("polling_units.id"))
+    election_id = Column(String(36), ForeignKey("elections.id"), nullable=False, index=True)
     agent_id = Column(String(36), ForeignKey("users.id"))
     
     # Tally
@@ -178,6 +184,10 @@ class AgentLocationPing(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     agent_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
     pu_id = Column(String(36), ForeignKey("polling_units.id"), nullable=False, index=True)
+    # Election this breadcrumb belongs to, so trails are evaluated per election
+    # (an agent checked in for the senatorial race shouldn't satisfy the
+    # governorship's presence check). Backfilled to the default election.
+    election_id = Column(String(36), ForeignKey("elections.id"), nullable=True, index=True)
     latitude = Column(Float, nullable=False)
     longitude = Column(Float, nullable=False)
     # True when the ping landed outside the assigned PU's geofence radius
@@ -185,3 +195,80 @@ class AgentLocationPing(Base):
     outside_geofence = Column(Boolean, default=False)
     distance_m = Column(Float, nullable=True)
     recorded_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class Election(Base):
+    """
+    An election monitored on this portal. Multiple elections of different types
+    (gubernatorial, senatorial, LGA, ...) can run concurrently; every piece of
+    operational data (agents, results, check-ins, pings) is scoped to one.
+    `code` is a short unique slug (e.g. "LAG-LGA-2027") that is signed into
+    every result payload, so a signature minted for election A is
+    cryptographically invalid for election B.
+    """
+    __tablename__ = "elections"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String(200), nullable=False)
+    code = Column(String(30), unique=True, nullable=False, index=True)
+    # general | presidential | gubernatorial | senatorial | house_of_reps | lga
+    type = Column(String(30), nullable=False, default="general")
+    # upcoming | live | closed
+    status = Column(String(20), nullable=False, default="upcoming", index=True)
+    party_a_name = Column(String(100), default="Party A")
+    party_b_name = Column(String(100), default="Party B")
+    party_c_name = Column(String(100), default="Party C")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ElectionPU(Base):
+    """
+    Election scope: the set of polling units in play for an election.
+    Materialized (rather than resolved by state/LGA joins at query time) so
+    senatorial-district scopes (arbitrary LGA groupings) work the same way as
+    whole-state scopes.
+    """
+    __tablename__ = "election_polling_units"
+    __table_args__ = (
+        UniqueConstraint("election_id", "pu_id", name="uq_election_pu"),
+    )
+
+    election_id = Column(String(36), ForeignKey("elections.id"), primary_key=True)
+    pu_id = Column(String(36), ForeignKey("polling_units.id"), primary_key=True)
+
+
+class AgentAssignment(Base):
+    """
+    Accreditation: which agent covers which polling unit for which election.
+    An agent may hold several assignments (same phone, several concurrent
+    elections) but each PU has exactly one accredited agent per election.
+    """
+    __tablename__ = "agent_assignments"
+    __table_args__ = (
+        UniqueConstraint("election_id", "pu_id", name="uq_assignment_election_pu"),
+    )
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    agent_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    election_id = Column(String(36), ForeignKey("elections.id"), nullable=False, index=True)
+    pu_id = Column(String(36), ForeignKey("polling_units.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AgentCheckIn(Base):
+    """
+    Per-election muster roll. Verify-entry used to be a single global flag on
+    the user row; with concurrent elections an agent checks in independently
+    for each race, and submissions/pings/trail checks bind to the check-in
+    session of the election they declare.
+    """
+    __tablename__ = "agent_checkins"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    agent_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    election_id = Column(String(36), ForeignKey("elections.id"), nullable=False, index=True)
+    pu_id = Column(String(36), ForeignKey("polling_units.id"), nullable=False)
+    checked_in_at = Column(DateTime, default=datetime.utcnow)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+    is_active = Column(Boolean, default=True, index=True)

@@ -31,11 +31,14 @@ async def _token_claims(authorization: Optional[str] = Header(None)) -> dict:
         return {}
 
 
-def compute_result_hash(payload: "ResultSubmitSchema") -> str:
+def compute_result_hash(payload: "ResultSubmitSchema", election_code: Optional[str] = None) -> str:
     """
     sha256 over a canonical, sorted JSON encoding of the result payload.
     This is the value anchored on-chain: anyone can recompute it from the
     published data and compare against the chain record to detect tampering.
+    The election code is part of the commitment, so the same tally submitted
+    under two different elections yields two distinct, independently
+    verifiable hashes.
     """
     canonical = {
         "agent_email": payload.agent_email,
@@ -46,6 +49,8 @@ def compute_result_hash(payload: "ResultSubmitSchema") -> str:
         "pu_code": payload.pu_code,
         "total_valid": payload.total_valid,
     }
+    if election_code:
+        canonical["election_code"] = election_code
     digest = hashlib.sha256(
         json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -101,7 +106,11 @@ class ResultSubmitSchema(BaseModel):
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     captured_at: str # ISO Timestamp from client
-    
+    # Election this result belongs to. The election is ALWAYS resolved
+    # server-side (never trusted from the client alone): when absent, the
+    # submission binds to the default GENERAL election for legacy apps.
+    election_id: Optional[str] = None
+
     # ADVANCED SECURITY FIELDS
     signature: Optional[str] = None
     signed_timestamp: Optional[str] = None
@@ -120,12 +129,39 @@ async def submit_election_result(
     payload. Enforces device binding, PU accreditation, and WORM immutability.
     """
 
-    # 0. Signature Verification (Non-Repudiation Check) — MANDATORY.
-    # The signature is generated from: puCode|partyAVotes|partyBVotes|partyCVotes
-    # and HMAC-SHA256 keyed with the submitting agent's unique device signing
-    # key (issued at provisioning). The key is looked up from the JWT identity,
-    # never from the payload, so a stolen token on its own cannot forge sigs.
-    payload_string = f"{payload.pu_code}|{payload.party_a_votes}|{payload.party_b_votes}|{payload.party_c_votes}"
+    # 0. Resolve the election FIRST — every downstream check (signature,
+    # accreditation, muster roll, dedupe) binds to it. The election is
+    # resolved from the payload's election_id against the server registry;
+    # a missing election_id means a legacy app and binds to the default
+    # GENERAL election.
+    from .models import Election, AgentAssignment, AgentCheckIn
+    if payload.election_id:
+        election_res = await db.execute(select(Election).where(Election.id == payload.election_id))
+        election = election_res.scalar_one_or_none()
+        if not election:
+            raise HTTPException(status_code=404, detail="Unknown election.")
+    else:
+        election_res = await db.execute(select(Election).where(Election.code == "GENERAL"))
+        election = election_res.scalar_one_or_none()
+    if not election:
+        raise HTTPException(status_code=409, detail="No election is configured on this server.")
+
+    if election.status != "live":
+        print(f"[SECURITY] Submission rejected: election {election.code} is {election.status}")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Submissions for {election.name} are closed (election is {election.status})."
+        )
+
+    # 1. Signature Verification (Non-Repudiation + Cross-Election Binding).
+    # The signed string is puCode|ELECTIONCODE|A|B|C: the election code is
+    # INSIDE the signature, so a payload minted for election A is
+    # cryptographically invalid for election B — the client cannot lie about
+    # which election it is reporting for. Legacy apps (no election context)
+    # are accepted only on the default GENERAL election with the old
+    # 4-field string; they can never reach an election-scoped race.
+    payload_string = f"{payload.pu_code}|{election.code}|{payload.party_a_votes}|{payload.party_b_votes}|{payload.party_c_votes}"
+    legacy_payload_string = f"{payload.pu_code}|{payload.party_a_votes}|{payload.party_b_votes}|{payload.party_c_votes}"
 
     if not payload.signature:
         print(f"[SECURITY ALERT] Unsigned submission attempt for PU {payload.pu_code}")
@@ -142,15 +178,27 @@ async def submit_election_result(
             detail="Device not fully provisioned: no signing key on record."
         )
 
-    if not verify_payload_signature(payload_string, payload.signature, signing_key):
-        print(f"[SECURITY ALERT] TAMPERING DETECTED: Signature mismatch for PU {payload.pu_code}")
+    signature_ok = verify_payload_signature(payload_string, payload.signature, signing_key)
+    if not signature_ok and election.code == "GENERAL":
+        # Legacy-format signature, default election only.
+        signature_ok = verify_payload_signature(legacy_payload_string, payload.signature, signing_key)
+    if not signature_ok:
+        print(f"[SECURITY ALERT] TAMPERING DETECTED: Signature mismatch for PU {payload.pu_code} (election {election.code})")
+        await log_audit(
+            db,
+            actor_id=agent.id,
+            action="SIGNATURE_REJECT",
+            target_id=payload.pu_code,
+            details=f"Signature mismatch on submission. Election={election.code}, election_id_in_payload={payload.election_id}"
+        )
+        await db.commit()
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Payload Integrity Error: Digital Signature Mismatch. Data may have been tampered with."
+            detail="Payload Integrity Error: Digital Signature Mismatch. Data may have been tampered with or signed for a different election."
         )
-    print(f"[SECURITY] Signature Verified for PU {payload.pu_code}")
+    print(f"[SECURITY] Signature Verified for PU {payload.pu_code} (election {election.code})")
 
-    # 1. Resolve PU
+    # 2. Resolve PU
     pu_res = await db.execute(select(PollingUnit).where(PollingUnit.pu_code == payload.pu_code))
     pu = pu_res.scalar_one_or_none()
     if not pu:
@@ -176,61 +224,115 @@ async def submit_election_result(
             detail="Access Denied: Agent account is inactive or device is unauthorized."
         )
 
-    # 2.6 Accreditation: an agent may only collate results for their own PU.
-    if not agent.assigned_pu_id or agent.assigned_pu_id != pu.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You are not the accredited agent for this polling unit."
-        )
+    # 2.6 Accreditation: an agent may only collate results for a PU they are
+    # assigned to IN THIS ELECTION. The same agent covering the same PU in a
+    # governorship and a senatorial race holds two separate assignments;
+    # either race rejects a submission lacking its own assignment.
+    assignment_res = await db.execute(select(AgentAssignment).where(
+        AgentAssignment.agent_id == agent.id,
+        AgentAssignment.election_id == election.id,
+        AgentAssignment.pu_id == pu.id,
+    ))
+    assignment = assignment_res.scalar_one_or_none()
+    if not assignment:
+        legacy_ok = (election.code == "GENERAL" and agent.assigned_pu_id == pu.id)
+        if not legacy_ok:
+            print(f"[SECURITY] Submission rejected: {agent.email} not accredited for PU {payload.pu_code} in {election.code}")
+            await log_audit(
+                db,
+                actor_id=agent.id,
+                action="ACCREDITATION_REJECT",
+                target_id=payload.pu_code,
+                details=f"Agent lacks an assignment for election {election.code} at this PU"
+            )
+            await db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"You are not the accredited agent for this polling unit in {election.name}."
+            )
 
     # 2.7 Muster-Roll Gate: an agent must have "Verified Entry" (checked in)
-    # before results can be collated, and the check-in must still be fresh.
-    # Without this the check-in was cosmetic — submissions worked without it.
+    # for THIS election before results can be collated, and the check-in
+    # session must still be fresh. The session also pins the PU: a session
+    # opened for the senatorial race cannot validate a governorship
+    # submission.
     import os as _os
     max_age_hours = float(_os.environ.get("CHECKIN_MAX_AGE_HOURS", "4"))
-    if not agent.is_on_site:
-        print(f"[SECURITY] Submission rejected: agent {agent.email} has not verified entry")
+    session_res = await db.execute(select(AgentCheckIn).where(
+        AgentCheckIn.agent_id == agent.id,
+        AgentCheckIn.election_id == election.id,
+        AgentCheckIn.is_active == True,
+    ).order_by(AgentCheckIn.checked_in_at.desc()))
+    session = session_res.scalars().first()
+
+    check_in_time, session_pu_id = None, None
+    if session:
+        check_in_time, session_pu_id = session.checked_in_at, session.pu_id
+    elif election.code == "GENERAL" and agent.is_on_site:
+        # Legacy fallback: user-row flags from before per-election sessions.
+        check_in_time, session_pu_id = agent.last_check_in, agent.assigned_pu_id
+
+    if check_in_time is None:
+        print(f"[SECURITY] Submission rejected: agent {agent.email} has not verified entry for {election.code}")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access Denied: You must Verify Entry at your polling unit before sending results."
         )
-    if agent.last_check_in is None:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access Denied: No check-in on record. Verify Entry before sending results."
-        )
-    check_in_age = (datetime.utcnow() - agent.last_check_in).total_seconds() / 3600
+    check_in_age = (datetime.utcnow() - check_in_time).total_seconds() / 3600
     if check_in_age > max_age_hours:
-        print(f"[SECURITY] Submission rejected: check-in stale ({check_in_age:.1f}h) for {agent.email}")
+        print(f"[SECURITY] Submission rejected: check-in stale ({check_in_age:.1f}h) for {agent.email} / {election.code}")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Access Denied: Your entry verification has expired ({int(check_in_age)}h old). Verify Entry again before sending results."
         )
+    if session_pu_id != pu.id:
+        print(f"[SECURITY] Submission rejected: check-in session PU mismatch for {agent.email} ({election.code})")
+        await log_audit(
+            db,
+            actor_id=agent.id,
+            action="SESSION_PU_MISMATCH",
+            target_id=payload.pu_code,
+            details=f"Check-in session is for a different PU/election than the submission target. Election={election.code}"
+        )
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access Denied: Your verified entry does not match this polling unit for this election."
+        )
 
     # 2.8 Presence-trail check (GPS breadcrumbs). The portal pings every
     # PING_INTERVAL_MINUTES (default 30) between Verify Entry and submission.
-    # A thin trail FLAGS the result for the situation room — it never blocks:
-    # GPS drift, dead batteries and backgrounded apps make a hard gate unsafe.
+    # Only pings belonging to THIS election's session count — a trail built
+    # for the senatorial race must not satisfy the governorship's presence
+    # check. A thin trail FLAGS the result for the situation room — it never
+    # blocks: GPS drift, dead batteries and backgrounded apps make a hard
+    # gate unsafe.
     ping_interval_h = float(_os.environ.get("PING_INTERVAL_MINUTES", "30")) / 60.0
     hours_on_site = check_in_age  # computed by the freshness gate above
     from .models import AgentLocationPing
     pings_res = await db.execute(select(AgentLocationPing).where(
         AgentLocationPing.agent_id == agent.id,
-        AgentLocationPing.recorded_at >= agent.last_check_in))
+        AgentLocationPing.election_id == election.id,
+        AgentLocationPing.recorded_at >= check_in_time))
     pings = pings_res.scalars().all()
     expected = int(hours_on_site / ping_interval_h) if ping_interval_h > 0 else 0
     required = max(0, expected - 1)  # one missed ping of grace
     trail_ok = len(pings) >= required
     if trail_ok and hours_on_site >= 1.5:
-        newest = max(p.recorded_at for p in pings) if pings else agent.last_check_in
+        newest = max(p.recorded_at for p in pings) if pings else check_in_time
         trail_ok = (datetime.utcnow() - newest).total_seconds() <= 75 * 60
     gps_trail_flag = not trail_ok
     if gps_trail_flag:
-        print(f"[SECURITY] Thin GPS trail for {agent.email}: "
+        print(f"[SECURITY] Thin GPS trail for {agent.email} ({election.code}): "
               f"{len(pings)} pings in {hours_on_site:.1f}h (expected ~{expected})")
 
-    # 3. Check if result already exists for this PU
-    existing_res = await db.execute(select(Result).where(Result.pu_id == pu.id))
+    # 3. Check if a result already exists for this PU in THIS election. The
+    # same PU reports independently per election, so uniqueness is
+    # (pu_id, election_id) — the senatorial result never collides with the
+    # governorship result at the same PU.
+    existing_res = await db.execute(select(Result).where(
+        Result.pu_id == pu.id,
+        Result.election_id == election.id))
     if existing_res.scalar_one_or_none():
         raise HTTPException(
             status_code=409, 
@@ -260,11 +362,13 @@ async def submit_election_result(
 
     # 4.5 Blockchain commitment: hash the canonical payload before persisting.
     # The hash is written in the same commit as the result (WORM-friendly);
-    # the on-chain anchor happens asynchronously afterwards.
-    result_hash = compute_result_hash(payload)
+    # the on-chain anchor happens asynchronously afterwards. The election
+    # code goes into the commitment so each race's tally anchors separately.
+    result_hash = compute_result_hash(payload, election.code)
 
     new_result = Result(
         pu_id=pu.id,
+        election_id=election.id,
         agent_id=agent.id,
         party_a_votes=payload.party_a_votes,
         party_b_votes=payload.party_b_votes,
@@ -307,7 +411,7 @@ async def submit_election_result(
         actor_id=agent.id,
         action="RESULT_SUBMISSION",
         target_id=new_result.id,
-        details=f"Result committed for PU {payload.pu_code}. Flagged={is_flagged}. Duress={is_under_duress}. GpsTrailFlag={gps_trail_flag}"
+        details=f"Result committed for PU {payload.pu_code} (election {election.code}). Flagged={is_flagged}. Duress={is_under_duress}. GpsTrailFlag={gps_trail_flag}"
     )
 
     await db.commit()
