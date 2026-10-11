@@ -124,6 +124,10 @@ const SyncManager = ({ assignedPu }) => {
                 const resultPayload = {
                     pu_code: draft.puCode,
                     agent_email: draft.agentEmail || assignedPu?.email,
+                    // Election binding carried on the draft from capture time.
+                    // Absent on pre-multi-election drafts: the server then
+                    // binds them to the default election (legacy path).
+                    election_id: draft.electionId || undefined,
                     party_a_votes: parseInt(draft.partyAVotes) || 0,
                     party_b_votes: parseInt(draft.partyBVotes) || 0,
                     party_c_votes: parseInt(draft.partyCVotes) || 0,

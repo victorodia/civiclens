@@ -6,7 +6,7 @@ import { saveDraft } from '../db/db';
 import { useNotification } from '../contexts/NotificationContext';
 import QRShareModal from './QRShareModal';
 
-const ResultCaptureForm = ({ assignedPu }) => {
+const ResultCaptureForm = ({ assignedPu, assignments }) => {
     const { showNotification } = useNotification();
     const [loading, setLoading] = useState(false);
     const [geoloading, setGeoLoading] = useState(false);
@@ -14,22 +14,56 @@ const ResultCaptureForm = ({ assignedPu }) => {
     const [error, setError] = useState(null);
     const [isQRModalOpen, setIsQRModalOpen] = useState(false);
     const [lastSavedData, setLastSavedData] = useState(null);
-    const [isCheckedIn, setIsCheckedIn] = useState(assignedPu?.is_on_site || false);
+
+    // ── Multi-election context ──
+    // The login payload carries one assignment per (election, PU). The agent
+    // explicitly picks WHICH live election they are reporting for; every
+    // later step (check-in, pings, signature, submission) is bound to that
+    // election so a result can never cross between races.
+    const liveAssignments = (assignments || []).filter(a => a.election_status === 'live');
+    const [pickedElectionId, setPickedElectionId] = useState(null);
+    // Auto-select when there is exactly one live assignment; otherwise wait
+    // for an explicit pick (mismatch prevention beats convenience).
+    const selected = liveAssignments.find(a => a.election_id === pickedElectionId)
+        || (liveAssignments.length === 1 ? liveAssignments[0] : null);
+    const mustPick = liveAssignments.length > 1;
+    const electionId = selected?.election_id || null;
+    const electionCode = selected?.election_code || null;
+
+    // Per-election muster-roll state: refreshed from login data, flipped
+    // locally after a successful Verify Entry for that election.
+    const [checkedInMap, setCheckedInMap] = useState({});
+    const isCheckedIn = electionId
+        ? !!(checkedInMap[electionId] || selected?.is_on_site)
+        : (assignedPu?.is_on_site || false);
+
+    const markCheckedIn = () => {
+        if (electionId) setCheckedInMap(prev => ({ ...prev, [electionId]: true }));
+    };
+
     const [checkInLoading, setCheckInLoading] = useState(false);
-    const [partyConfig, setPartyConfig] = useState({
+    const [fallbackConfig, setFallbackConfig] = useState({
         party_a_name: 'Party A',
         party_b_name: 'Party B',
         party_c_name: 'Party C',
         election_name: 'General Election'
     });
 
-    // Fetch party names from admin-configured election config
+    // Fetch party names from admin-configured election config — fallback for
+    // legacy deployments where the login payload carries no assignments.
     useEffect(() => {
         fetch('/admin/election-config')
             .then(res => res.ok ? res.json() : null)
-            .then(data => { if (data) setPartyConfig(data); })
+            .then(data => { if (data) setFallbackConfig(data); })
             .catch(() => { }); // Fail silently — defaults remain
     }, []);
+
+    const partyConfig = selected ? {
+        party_a_name: selected.party_a_name,
+        party_b_name: selected.party_b_name,
+        party_c_name: selected.party_c_name,
+        election_name: selected.election_name
+    } : fallbackConfig;
 
     const [formData, setFormData] = useState({
         puCode: assignedPu?.pu_code || '',
@@ -46,7 +80,6 @@ const ResultCaptureForm = ({ assignedPu }) => {
     useEffect(() => {
         if (assignedPu?.pu_code) {
             setFormData(prev => ({ ...prev, puCode: assignedPu.pu_code }));
-            setIsCheckedIn(assignedPu.is_on_site);
         }
     }, [assignedPu]);
 
@@ -124,11 +157,22 @@ const ResultCaptureForm = ({ assignedPu }) => {
 
     const handleCheckIn = async () => {
         if (!assignedPu?.email) return;
+        if (mustPick && !selected) {
+            showNotification("Select which election you are reporting for first.", "warning");
+            return;
+        }
         setCheckInLoading(true);
-        console.log('[CHECK-IN] Starting for:', assignedPu.email);
+        console.log('[CHECK-IN] Starting for:', assignedPu.email, 'election:', electionCode);
 
         const sendCheckIn = async (coords = { latitude: null, longitude: null }) => {
-            const payload = { email: assignedPu.email, latitude: coords.latitude, longitude: coords.longitude };
+            const payload = {
+                email: assignedPu.email,
+                latitude: coords.latitude,
+                longitude: coords.longitude,
+                // Binds this Verify Entry to the chosen election — the server
+                // opens a muster-roll session for THIS race only.
+                ...(electionId ? { election_id: electionId } : {})
+            };
             console.log('[CHECK-IN] Payload:', JSON.stringify(payload));
             try {
                 const token = localStorage.getItem('cl_access_token');
@@ -144,8 +188,8 @@ const ResultCaptureForm = ({ assignedPu }) => {
                 const responseData = await res.json();
                 console.log('[CHECK-IN] Response:', responseData);
                 if (res.ok) {
-                    setIsCheckedIn(true);
-                    showNotification("Arrival Verified. Coordinates stored.", "success");
+                    markCheckedIn();
+                    showNotification(`Arrival Verified for ${selected?.election_name || 'your assignment'}. Coordinates stored.`, "success");
                 } else {
                     showNotification(responseData.detail || "Check-in failed.", "error");
                 }
@@ -218,7 +262,13 @@ const ResultCaptureForm = ({ assignedPu }) => {
                     'X-Device-Fingerprint': 'MOCKED_PHONE_ID',
                     ...(token ? { 'Authorization': `Bearer ${token}` } : {})
                 },
-                body: JSON.stringify({ email: assignedPu.email, ...coords })
+                body: JSON.stringify({
+                    email: assignedPu.email,
+                    ...coords,
+                    // Tag the breadcrumb with the election so each race's
+                    // presence trail is evaluated independently.
+                    ...(electionId ? { election_id: electionId } : {})
+                })
             });
             if (!res.ok) {
                 console.warn('[PING] rejected:', res.status, await res.text());
@@ -260,6 +310,10 @@ const ResultCaptureForm = ({ assignedPu }) => {
         setError(null);
 
         // Basic validation
+        if (mustPick && !selected) {
+            setError("Select which election you are reporting for first.");
+            return;
+        }
         if (!formData.puCode || (!formData.image && !formData.video)) {
             setError("PU Code and at least one form of evidence (Photo or Video) are required.");
             return;
@@ -287,7 +341,15 @@ const ResultCaptureForm = ({ assignedPu }) => {
             // Keyed with THIS agent's unique device signing key (issued at
             // provisioning, entered at login) — the server rejects payloads
             // signed with any other key.
-            const payloadToSign = `${formData.puCode}|${formData.partyAVotes}|${formData.partyBVotes}|${formData.partyCVotes}`;
+            //
+            // When an election is selected, its code is part of the signed
+            // string (pu|CODE|a|b|c): the server can then cryptographically
+            // prove this payload belongs to that race and no other. Legacy
+            // deployments (no assignment) keep the old 4-field string and
+            // bind to the default election.
+            const payloadToSign = electionCode
+                ? `${formData.puCode}|${electionCode}|${formData.partyAVotes}|${formData.partyBVotes}|${formData.partyCVotes}`
+                : `${formData.puCode}|${formData.partyAVotes}|${formData.partyBVotes}|${formData.partyCVotes}`;
 
             const deviceKey = (localStorage.getItem('cl_signing_key') || '').trim();
             if (!deviceKey) {
@@ -308,6 +370,8 @@ const ResultCaptureForm = ({ assignedPu }) => {
                 ...formData,
                 location: locationData || formData.location,
                 agentEmail: assignedPu?.email,
+                electionId,          // server binds the result to this election
+                electionName: selected?.election_name || null,
                 signature,
                 signedTimestamp: new Date().toISOString(),
                 createdAt: new Date().toISOString()
@@ -373,6 +437,41 @@ const ResultCaptureForm = ({ assignedPu }) => {
 
     return (
         <form onSubmit={handleSubmit} className="space-y-6 animate-in slide-in-from-bottom-4 duration-500">
+            {/* Election picker — only when the agent covers several live races.
+                The choice made here locks check-in, pings and the signature
+                to that election. */}
+            {mustPick && (
+                <div className="space-y-2">
+                    <label className="text-[9px] font-black text-gray-400 uppercase tracking-[0.2em] ml-1">
+                        Which election are you reporting for?
+                    </label>
+                    {liveAssignments.map(a => (
+                        <button
+                            key={a.election_id}
+                            type="button"
+                            onClick={() => setPickedElectionId(a.election_id)}
+                            className={`w-full p-4 rounded-2xl border-2 text-left transition-all ${
+                                selected?.election_id === a.election_id
+                                    ? 'border-brand bg-brand/5 dark:bg-brand/10'
+                                    : 'border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-900/50'
+                            }`}
+                        >
+                            <div className="flex items-center justify-between">
+                                <div>
+                                    <p className="text-xs font-black uppercase tracking-tight text-gray-900 dark:text-white">
+                                        {a.election_name}
+                                    </p>
+                                    <p className="text-[9px] text-gray-400 font-mono">{a.election_code}</p>
+                                </div>
+                                {selected?.election_id === a.election_id && (
+                                    <CheckCircle className="w-4 h-4 text-brand" />
+                                )}
+                            </div>
+                        </button>
+                    ))}
+                </div>
+            )}
+
             {/* Immutable Geographic Context */}
             {/* Immutable Geographic Context / Operational Sector */}
             {assignedPu && (
@@ -386,6 +485,18 @@ const ResultCaptureForm = ({ assignedPu }) => {
                                 <div className="w-1.5 h-1.5 bg-brand rounded-full animate-pulse" />
                                 <span>Active Operational Sector</span>
                             </div>
+
+                            {/* Locked election banner: the result form renders
+                                from this context — the agent never types which
+                                election they report for. */}
+                            {selected && (
+                                <div className="bg-brand/10 dark:bg-brand/20 border border-brand/20 rounded-xl px-3 py-2">
+                                    <p className="text-[8px] font-black text-gray-400 uppercase tracking-widest">Reporting for</p>
+                                    <p className="text-[11px] font-black text-brand uppercase tracking-tight">
+                                        {selected.election_name} <span className="font-mono text-gray-400">({selected.election_code})</span>
+                                    </p>
+                                </div>
+                            )}
 
                             <div className="grid grid-cols-2 gap-y-3">
                                 <div>
@@ -414,8 +525,8 @@ const ResultCaptureForm = ({ assignedPu }) => {
                                     <button
                                         type="button"
                                         onClick={handleCheckIn}
-                                        disabled={checkInLoading}
-                                        className="px-4 py-2 bg-brand text-white text-[9px] font-black uppercase tracking-widest rounded-xl shadow-lg shadow-brand/20 active:scale-95 transition-all"
+                                        disabled={checkInLoading || (mustPick && !selected)}
+                                        className="px-4 py-2 bg-brand text-white text-[9px] font-black uppercase tracking-widest rounded-xl shadow-lg shadow-brand/20 active:scale-95 transition-all disabled:opacity-40"
                                     >
                                         {checkInLoading ? '...' : 'Verify Entry'}
                                     </button>

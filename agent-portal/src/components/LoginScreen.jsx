@@ -110,8 +110,9 @@ const LoginScreen = ({ onLoginSuccess, onRequireReset }) => {
             } else {
                 // Persist the JWT so offline drafts sync with authenticated identity
                 localStorage.setItem('cl_access_token', data.access_token);
-                // Success - state elevated to Authenticated with PU context
-                onLoginSuccess(data.assigned_pu);
+                // Success - state elevated to Authenticated with PU context and
+                // the full election-assignment list (multi-election support)
+                onLoginSuccess(data.assigned_pu, data.assignments);
             }
         } catch (err) {
             showNotification(err.message, "error");

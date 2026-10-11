@@ -110,6 +110,13 @@ function App() {
     return saved ? JSON.parse(saved) : null;
   });
 
+  // Election assignments from the login payload: one entry per (election, PU)
+  // the agent is accredited for. Drives the election picker in the capture form.
+  const [assignments, setAssignments] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('cl_assignments') || '[]'); }
+    catch { return []; }
+  });
+
   useEffect(() => {
     console.log("[CIVIC LENS] Agent Portal v1.0.0-PROD Initialization Complete");
   }, []);
@@ -139,10 +146,12 @@ function App() {
 
         {!isAuthenticated && !isResetRequired && (
           <LoginScreen
-            onLoginSuccess={(pu) => { 
+            onLoginSuccess={(pu, assigns) => { 
                 localStorage.setItem('isAuthenticated', 'true');
                 localStorage.setItem('assignedPu', JSON.stringify(pu));
-                setAssignedPu(pu); 
+                localStorage.setItem('cl_assignments', JSON.stringify(assigns || []));
+                setAssignedPu(pu);
+                setAssignments(assigns || []);
                 setIsAuthenticated(true); 
             }}
             onRequireReset={(email) => { setResetEmail(email); setIsResetRequired(true); }}
@@ -170,7 +179,7 @@ function App() {
                     <h2 className="text-xl font-black text-gray-900 dark:text-white uppercase tracking-tight">Agent Submission</h2>
                     <p className="text-xs text-gray-400 font-bold uppercase tracking-wider">Field Data Capture</p>
                   </div>
-                  <ResultCaptureForm assignedPu={assignedPu} />
+                  <ResultCaptureForm assignedPu={assignedPu} assignments={assignments} />
                 </div>
               )}
 

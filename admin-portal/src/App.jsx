@@ -14,7 +14,34 @@ import ResultsFeed from './components/ResultsFeed';
 import { NotificationProvider, useNotification } from './contexts/NotificationContext';
 import NotificationBanner from './components/NotificationBanner';
 import SecurityDialog from './components/SecurityDialog';
-import { LayoutDashboard, ShieldCheck, UserCircle, Users, Activity, Map, Settings, FileText } from 'lucide-react';
+import { LayoutDashboard, ShieldCheck, UserCircle, Users, Activity, Map, Settings, FileText, Vote } from 'lucide-react';
+import { ElectionProvider, useElection } from './contexts/ElectionContext';
+import Elections from './components/Elections';
+
+// Election-scoped live map: reads the active election from context so the
+// switcher in the header drives what the map displays.
+function LiveMapGate({ setActiveView }) {
+  const { activeElectionId } = useElection();
+  return <MonitorMap setActiveView={setActiveView} electionId={activeElectionId || null} />;
+}
+
+function ElectionSwitcher() {
+  const { elections, activeElectionId, setActiveElection } = useElection();
+  if (!elections.length) return null;
+  return (
+    <select
+      value={activeElectionId}
+      onChange={e => setActiveElection(e.target.value)}
+      title="Active election — pages and the live map follow this selection"
+      className="ml-2 bg-white/15 hover:bg-white/25 border border-white/25 rounded-lg text-[10px] font-black uppercase tracking-widest px-2 py-1.5 max-w-[150px] truncate"
+    >
+      <option value="">All elections</option>
+      {elections.map(e => (
+        <option key={e.id} value={e.id}>{e.name}</option>
+      ))}
+    </select>
+  );
+}
 
 function LayoutShell({ children, activeView, setActiveView, onLogout, walletStatus, onRefreshWallet, hasPerm }) {
   const { isDarkMode, toggleTheme } = useTheme();
@@ -43,6 +70,7 @@ function LayoutShell({ children, activeView, setActiveView, onLogout, walletStat
               CL
             </div>
             <h1 className="text-base font-black tracking-[0.15em] uppercase">ADMIN PORTAL</h1>
+            <ElectionSwitcher />
           </div>
 
           <div className="flex items-center space-x-2">
@@ -147,6 +175,14 @@ function LayoutShell({ children, activeView, setActiveView, onLogout, walletStat
             <UserCircle className="w-5 h-5 mb-1" />
             <span className="text-[9px] font-black uppercase tracking-widest">Profile</span>
           </button>
+
+          { hasPerm("view_results") && <button
+            onClick={() => setActiveView('elections')}
+            className={`flex flex-col items-center justify-center w-full h-full transition-colors ${activeView === 'elections' ? 'text-brand' : 'text-gray-400'}`}
+          >
+            <Vote className="w-5 h-5 mb-1" />
+            <span className="text-[9px] font-black uppercase tracking-widest">Elections</span>
+          </button> }
 
           { (hasPerm("trigger_factory_reset") || hasPerm("view_system_users")) && <button
             onClick={() => setActiveView('settings')}
@@ -325,7 +361,9 @@ function App() {
       case 'workforce':
         return <WorkforceMonitor setActiveView={setPersistedActiveView} />;
       case 'livemap':
-        return <MonitorMap setActiveView={setPersistedActiveView} />;
+        return <LiveMapGate setActiveView={setPersistedActiveView} />;
+      case 'elections':
+        return <Elections setActiveView={setPersistedActiveView} />;
       case 'audit':
         return <CoverageAudit setActiveView={setPersistedActiveView} />;
       case 'profile':
@@ -340,6 +378,7 @@ function App() {
   return (
     <ThemeProvider>
       <NotificationProvider>
+        <ElectionProvider>
         <NotificationBanner />
         {walletStatus.balance !== null && walletStatus.balance < 0.05 && (
           <div className="bg-red-600 text-white font-black p-3 text-center z-[9999] relative flex flex-col items-center">
@@ -367,6 +406,7 @@ function App() {
             {renderView()}
           </div>
         </LayoutShell>
+        </ElectionProvider>
       </NotificationProvider>
     </ThemeProvider>
   );

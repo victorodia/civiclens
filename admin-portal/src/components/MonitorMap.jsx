@@ -15,7 +15,7 @@ const STATUS = {
 
 const NIGERIA_BOUNDS = [[4.0, 2.5], [14.2, 14.9]];
 
-const MonitorMap = ({ setActiveView }) => {
+const MonitorMap = ({ setActiveView, electionId }) => {
     const [data, setData] = useState(null);
     const [loadError, setLoadError] = useState(null);
     const [lastRefresh, setLastRefresh] = useState(null);
@@ -25,7 +25,8 @@ const MonitorMap = ({ setActiveView }) => {
 
     const fetchData = async () => {
         try {
-            const res = await fetch('/admin/monitor/map');
+            const qs = electionId ? `?election_id=${encodeURIComponent(electionId)}` : '';
+            const res = await fetch(`/admin/monitor/map${qs}`);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const d = await res.json();
             setData(d);
@@ -37,10 +38,11 @@ const MonitorMap = ({ setActiveView }) => {
     };
 
     useEffect(() => {
+        setData(null);
         fetchData();
         const t = setInterval(fetchData, 60000); // live-ish: mirrors the server 30s cache
         return () => clearInterval(t);
-    }, []);
+    }, [electionId]);
 
     useEffect(() => {
         if (!mapElRef.current || mapRef.current) return;
