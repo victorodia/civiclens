@@ -943,3 +943,94 @@ async def get_result_presence_trail(
 def _geofence_radius() -> float:
     import os as _os
     return float(_os.environ.get("GEOFENCE_RADIUS_METRES", "200"))
+
+
+# ── In-memory cache: the map query scans the registry, so serve fresh ──
+# data at most once every 30 seconds regardless of how many dashboards
+# are open in the situation room.
+_monitor_cache = {"at": 0.0, "payload": None}
+
+
+@router.get("/monitor/map")
+async def get_monitor_map(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(RequirePermission("view_results")),
+):
+    """
+    Live operational map: one status per polling unit that carries an agent
+    (individual marker) plus LGA-level grey bubbles for PUs with no agent
+    yet (plotting 170k+ points would melt browsers).
+
+    Statuses: assigned (blue, agent not on site), on_site (green, verified
+    entry and latest fix inside the fence), out_of_fence (orange, latest
+    fix outside the perimeter), submitted (purple, result collated).
+    """
+    import time as _time
+    from sqlalchemy import text as _text
+
+    now = _time.time()
+    if _monitor_cache["payload"] and now - _monitor_cache["at"] < 30:
+        return _monitor_cache["payload"]
+
+    # Agent-carrying PUs with live status
+    agent_rows = (await db.execute(_text("""
+        SELECT pu.pu_code, pu.name,
+               pu.expected_latitude::float AS lat, pu.expected_longitude::float AS lng,
+               u.is_on_site, u.last_check_in,
+               (r.id IS NOT NULL) AS submitted,
+               lp.outside_geofence AS latest_outside
+        FROM polling_units pu
+        JOIN users u ON u.assigned_pu_id = pu.id AND u.role = 'agent'
+        LEFT JOIN results r ON r.pu_id = pu.id
+        LEFT JOIN LATERAL (
+            SELECT outside_geofence FROM agent_location_pings p
+            WHERE p.agent_id = u.id ORDER BY recorded_at DESC LIMIT 1
+        ) lp ON true
+        WHERE pu.expected_latitude IS NOT NULL
+    """))).all()
+
+    markers = []
+    counters = {"assigned": 0, "on_site": 0, "out_of_fence": 0, "submitted": 0}
+    for pu_code, name, lat, lng, is_on_site, last_check_in, submitted, latest_outside in agent_rows:
+        if submitted:
+            status = "submitted"
+        elif not is_on_site or last_check_in is None:
+            status = "assigned"
+        elif latest_outside is True:
+            status = "out_of_fence"
+        else:
+            status = "on_site"
+        counters[status] += 1
+        markers.append({"pu_code": pu_code, "name": name, "lat": lat, "lng": lng,
+                        "status": status})
+
+    # Unassigned PUs aggregated to LGA bubbles
+    cluster_rows = (await db.execute(_text("""
+        SELECT s.name AS state, l.name AS lga,
+               count(*) AS n,
+               avg(pu.expected_latitude::float) AS lat,
+               avg(pu.expected_longitude::float) AS lng
+        FROM polling_units pu
+        JOIN wards w ON pu.ward_id = w.id
+        JOIN lgas l ON w.lga_id = l.id
+        JOIN states s ON l.state_id = s.id
+        LEFT JOIN users u ON u.assigned_pu_id = pu.id AND u.role = 'agent'
+        WHERE u.id IS NULL AND pu.expected_latitude IS NOT NULL
+        GROUP BY s.name, l.name
+    """))).all()
+    unassigned_clusters = [{"state": s, "lga": l, "count": n, "lat": lat, "lng": lng}
+                           for s, l, n, lat, lng in cluster_rows]
+    counters["unassigned"] = sum(c["count"] for c in unassigned_clusters)
+
+    no_coords = (await db.execute(_text(
+        "SELECT count(*) FROM polling_units WHERE expected_latitude IS NULL"))).scalar()
+
+    payload = {
+        "generated_at": now,
+        "counters": {**counters, "no_coordinates": no_coords or 0},
+        "markers": markers,
+        "unassigned_clusters": unassigned_clusters,
+    }
+    _monitor_cache["at"] = now
+    _monitor_cache["payload"] = payload
+    return payload

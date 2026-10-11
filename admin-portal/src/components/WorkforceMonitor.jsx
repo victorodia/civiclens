@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Users, MapPin, CheckCircle, Clock, Image as ImageIcon, Filter, Search, RefreshCw, X, Shield, ExternalLink, Download } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
-const WorkforceMonitor = () => {
+const WorkforceMonitor = ({ setActiveView }) => {
     const [workforce, setWorkforce] = useState([]);
     const [isLoading, setIsLoading] = useState(true);
     const [isRefreshing, setIsRefreshing] = useState(false);
@@ -160,6 +160,14 @@ const WorkforceMonitor = () => {
                             title="Workforce Integrity Audit"
                         >
                             <Shield className={`w-5 h-5 ${securityAudit ? 'animate-pulse' : ''}`} />
+                        </button>
+                        <button
+                            onClick={() => setActiveView && setActiveView('livemap')}
+                            className="px-3 py-1.5 text-[10px] font-black uppercase tracking-widest text-white bg-brand hover:bg-brand/90 rounded-xl shadow-lg shadow-brand/20 transition-all flex items-center"
+                            title="Open live operational map"
+                        >
+                            <MapPin className="w-4 h-4 mr-1.5" />
+                            Live Map
                         </button>
                         <button
                             onClick={() => {

@@ -6,6 +6,7 @@ import LoginScreen from './components/LoginScreen';
 import PasswordResetScreen from './components/PasswordResetScreen';
 import AgentManagement from './components/AgentManagement';
 import WorkforceMonitor from './components/WorkforceMonitor';
+import MonitorMap from './components/MonitorMap';
 import CoverageAudit from './components/CoverageAudit';
 import UserProfileScreen from './components/UserProfileScreen';
 import ElectionConfig from './components/ElectionConfig';
@@ -322,7 +323,9 @@ function App() {
       case 'agents':
         return <AgentManagement />;
       case 'workforce':
-        return <WorkforceMonitor />;
+        return <WorkforceMonitor setActiveView={setPersistedActiveView} />;
+      case 'livemap':
+        return <MonitorMap setActiveView={setPersistedActiveView} />;
       case 'audit':
         return <CoverageAudit setActiveView={setPersistedActiveView} />;
       case 'profile':
