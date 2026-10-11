@@ -1,7 +1,160 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { FileText, Maximize2, X, AlertCircle, Copy, Search, Download } from 'lucide-react';
+import { FileText, Maximize2, X, AlertCircle, Copy, Search, Download, MapPin } from 'lucide-react';
 import { useNotification } from '../contexts/NotificationContext';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
+
+// ── Presence-trail viewer: map + timeline of an agent's GPS breadcrumbs ──
+const PresenceTrailModal = ({ doc, onClose }) => {
+    const [trail, setTrail] = useState(null);
+    const [loadError, setLoadError] = useState(null);
+    const mapElRef = useRef(null);
+    const mapRef = useRef(null);
+
+    useEffect(() => {
+        fetch(`/admin/results/${doc.id}/trail`)
+            .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+            .then(setTrail)
+            .catch(e => setLoadError(e.message));
+    }, [doc.id]);
+
+    useEffect(() => {
+        if (!trail || mapRef.current || !mapElRef.current) return;
+        const map = L.map(mapElRef.current, { zoomControl: true });
+        L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(map);
+
+        const bounds = [];
+        const addPt = (lat, lng) => { if (lat != null && lng != null) bounds.push([lat, lng]); };
+
+        if (trail.anchor) {
+            addPt(trail.anchor.lat, trail.anchor.lng);
+            L.circle([trail.anchor.lat, trail.anchor.lng], {
+                radius: trail.geofence_radius_m || 400,
+                color: '#2563eb', weight: 1, fillOpacity: 0.06
+            }).addTo(map).bindPopup(`Geofence: ${trail.pu_code} (±${trail.geofence_radius_m || 400} m)`);
+            L.circleMarker([trail.anchor.lat, trail.anchor.lng], {
+                radius: 5, color: '#2563eb', fillColor: '#2563eb', fillOpacity: 0.9
+            }).addTo(map).bindPopup(`Anchor: ${trail.pu_name || trail.pu_code}`);
+        }
+
+        const pingPts = (trail.pings || [])
+            .filter(p => p.lat != null && p.lng != null)
+            .map(p => [p.lat, p.lng]);
+        if (pingPts.length > 1) {
+            L.polyline(pingPts, { color: '#10b981', weight: 2, opacity: 0.7, dashArray: '4 4' }).addTo(map);
+        }
+        (trail.pings || []).forEach(p => {
+            if (p.lat == null || p.lng == null) return;
+            addPt(p.lat, p.lng);
+            L.circleMarker([p.lat, p.lng], {
+                radius: 5,
+                color: p.outside_geofence ? '#dc2626' : '#10b981',
+                fillColor: p.outside_geofence ? '#dc2626' : '#10b981',
+                fillOpacity: 0.85
+            }).addTo(map).bindPopup(
+                `Ping ${new Date(p.at).toLocaleTimeString()}<br/>` +
+                `Distance from anchor: ${p.distance_m != null ? Math.round(p.distance_m) + ' m' : 'unknown'}` +
+                (p.outside_geofence ? '<br/><b>OUTSIDE GEOFENCE</b>' : '')
+            );
+        });
+
+        if (trail.check_in && trail.check_in.lat != null) {
+            addPt(trail.check_in.lat, trail.check_in.lng);
+            L.circleMarker([trail.check_in.lat, trail.check_in.lng], {
+                radius: 7, color: '#1d4ed8', fillColor: '#3b82f6', fillOpacity: 0.9
+            }).addTo(map).bindPopup(`Verify-entry ${new Date(trail.check_in.at).toLocaleString()}`);
+        }
+        if (trail.submission && trail.submission.lat != null) {
+            addPt(trail.submission.lat, trail.submission.lng);
+            L.circleMarker([trail.submission.lat, trail.submission.lng], {
+                radius: 7, color: '#111827', fillColor: '#111827', fillOpacity: 0.9
+            }).addTo(map).bindPopup(`Result submitted ${new Date(trail.submission.at).toLocaleString()}`);
+        }
+
+        if (bounds.length > 0) {
+            map.fitBounds(L.latLngBounds(bounds).pad(0.35));
+        } else {
+            map.setView([9.082, 8.6753], 6); // Nigeria fallback
+        }
+        mapRef.current = map;
+        return () => { map.remove(); mapRef.current = null; };
+    }, [trail]);
+
+    const outsideCount = (trail?.pings || []).filter(p => p.outside_geofence).length;
+
+    return (
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/80 z-[200] flex items-center justify-center p-4 backdrop-blur-sm">
+            <motion.div initial={{ scale: 0.95, y: 20 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.95, y: 20 }}
+                className="bg-white dark:bg-gray-900 rounded-2xl shadow-2xl max-w-4xl w-full overflow-hidden border border-gray-100 dark:border-gray-800">
+                <div className="p-4 border-b border-gray-100 dark:border-gray-800 flex justify-between items-center bg-gray-50 dark:bg-gray-800/50">
+                    <h3 className="font-bold text-gray-900 dark:text-white flex items-center">
+                        <MapPin className="w-4 h-4 mr-2 text-brand" />
+                        Presence Trail — {trail?.pu_code || doc.pu_code}
+                        {trail?.gps_trail_flag && (
+                            <span className="ml-3 text-[10px] font-black uppercase bg-amber-100 text-amber-700 dark:bg-amber-500/20 dark:text-amber-400 px-2 py-0.5 rounded-full">
+                                Thin GPS trail
+                            </span>
+                        )}
+                    </h3>
+                    <button onClick={onClose} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
+                        <X className="w-5 h-5" />
+                    </button>
+                </div>
+
+                <div className="p-4">
+                    {loadError ? (
+                        <div className="p-8 text-center text-sm text-red-500">Failed to load trail: {loadError}</div>
+                    ) : !trail ? (
+                        <div className="p-8 text-center text-sm text-gray-400">Loading trail…</div>
+                    ) : (
+                        <>
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3 text-center">
+                                <div className="bg-gray-50 dark:bg-gray-800/50 rounded-lg p-2">
+                                    <p className="text-[9px] text-gray-400 font-bold uppercase">Pings</p>
+                                    <p className="font-black text-sm">{trail.pings.length}</p>
+                                </div>
+                                <div className="bg-gray-50 dark:bg-gray-800/50 rounded-lg p-2">
+                                    <p className="text-[9px] text-gray-400 font-bold uppercase">Outside fence</p>
+                                    <p className={`font-black text-sm ${outsideCount > 0 ? 'text-red-500' : 'text-green-600'}`}>{outsideCount}</p>
+                                </div>
+                                <div className="bg-gray-50 dark:bg-gray-800/50 rounded-lg p-2">
+                                    <p className="text-[9px] text-gray-400 font-bold uppercase">Verify-entry</p>
+                                    <p className="font-black text-[10px]">{trail.check_in?.at ? new Date(trail.check_in.at).toLocaleTimeString() : '—'}</p>
+                                </div>
+                                <div className="bg-gray-50 dark:bg-gray-800/50 rounded-lg p-2">
+                                    <p className="text-[9px] text-gray-400 font-bold uppercase">Submitted</p>
+                                    <p className="font-black text-[10px]">{trail.submission?.at ? new Date(trail.submission.at).toLocaleTimeString() : '—'}</p>
+                                </div>
+                            </div>
+                            <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
+                                <div ref={mapElRef} className="md:col-span-3 h-72 rounded-xl overflow-hidden border border-gray-200 dark:border-gray-700 z-0" />
+                                <div className="md:col-span-2 max-h-72 overflow-y-auto pr-1 space-y-1">
+                                    {trail.pings.length === 0 && (
+                                        <p className="text-xs text-gray-400 text-center py-6">No GPS pings recorded for this window.</p>
+                                    )}
+                                    {[...(trail.pings || [])].reverse().map((p, i) => (
+                                        <div key={i} className={`flex items-center justify-between text-[11px] px-2 py-1.5 rounded-lg border ${p.outside_geofence ? 'bg-red-50 border-red-200 dark:bg-red-500/10 dark:border-red-500/30' : 'bg-gray-50 border-gray-100 dark:bg-gray-800/50 dark:border-gray-800'}`}>
+                                            <span className="font-mono">{p.at ? new Date(p.at).toLocaleTimeString() : '—'}</span>
+                                            <span className={p.outside_geofence ? 'text-red-500 font-bold' : 'text-gray-400'}>
+                                                {p.distance_m != null ? `${Math.round(p.distance_m)} m` : '—'}
+                                                {p.outside_geofence ? ' ⚠ outside' : ''}
+                                            </span>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </>
+                    )}
+                </div>
+            </motion.div>
+        </motion.div>
+    );
+};
 
 const ResultsFeed = () => {
     const [documents, setDocuments] = useState([]);
@@ -65,6 +218,7 @@ const ResultsFeed = () => {
     }, [searchQuery, startDate, endDate, showNotification]);
 
     const [proofModalDoc, setProofModalDoc] = useState(null);
+    const [trailModalDoc, setTrailModalDoc] = useState(null);
 
     const handleCopy = (text, type) => {
         navigator.clipboard.writeText(text);
@@ -261,6 +415,9 @@ const ResultsFeed = () => {
                         </motion.div>
                     </motion.div>
                 )}
+                {trailModalDoc && (
+                    <PresenceTrailModal doc={trailModalDoc} onClose={() => setTrailModalDoc(null)} />
+                )}
             </AnimatePresence>
 
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -418,6 +575,17 @@ const ResultsFeed = () => {
                                         <p className="text-[9px] text-gray-400 font-bold">Party C</p>
                                         <p className="font-black text-sm">{doc.party_c}</p>
                                     </div>
+                                </div>
+
+                                <div className="p-3 bg-slate-50 dark:bg-slate-900 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between">
+                                    <span className={`text-[9px] font-black uppercase tracking-widest flex items-center ${doc.gps_trail_flag ? 'text-amber-600 dark:text-amber-400' : 'text-gray-400'}`}>
+                                        {doc.gps_trail_flag && <AlertCircle className="w-3 h-3 mr-1" />}
+                                        {doc.gps_trail_flag ? 'GPS trail thin' : 'Presence trail'}
+                                    </span>
+                                    <button onClick={() => setTrailModalDoc(doc)} className="text-[9px] font-bold text-brand hover:underline flex items-center">
+                                        <MapPin className="w-3 h-3 mr-1" />
+                                        View trail
+                                    </button>
                                 </div>
 
                                 {doc.blockchain_hash && (

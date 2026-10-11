@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from .db import get_db
 from .verification import mock_ocr_analysis, verify_result_integrity
 
-from .models import User, Role, CustomRole, State, LGA, Ward, PollingUnit, Result, ElectionConfig, AuditLog
+from .models import User, Role, CustomRole, State, LGA, Ward, PollingUnit, Result, ElectionConfig, AuditLog, AgentLocationPing
 from .security import get_current_user, RequirePermission, log_audit, verify_password, get_password_hash
 
 
@@ -827,6 +827,7 @@ async def get_all_documents(
             "uploaded_at": result.uploaded_at.isoformat() if result.uploaded_at else None,
             "blockchain_hash": result.blockchain_hash,
             "blockchain_tx_id": result.blockchain_tx_id,
+            "gps_trail_flag": result.gps_trail_flag,
         })
     return documents
 
@@ -860,5 +861,85 @@ async def get_pending_verifications(
             "ai_party_c": result.ai_party_c_votes,
             "ai_confidence": result.ai_confidence,
             "captured_at": result.captured_at.isoformat() if result.captured_at else None,
+            "gps_trail_flag": result.gps_trail_flag,
         })
     return queue
+
+
+@router.get("/results/{result_id}/trail")
+async def get_result_presence_trail(
+    result_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(RequirePermission("view_results")),
+):
+    """
+    Presence trail for one result: the agent's verify-entry point, every GPS
+    breadcrumb recorded between check-in and submission, the submission point
+    itself, and the PU's geofence anchor — everything the situation room needs
+    to eyeball whether the agent was physically on site throughout.
+    """
+    res = await db.execute(
+        select(Result, PollingUnit, User)
+        .join(PollingUnit, Result.pu_id == PollingUnit.id, isouter=True)
+        .join(User, Result.agent_id == User.id, isouter=True)
+        .where(Result.id == result_id)
+    )
+    row = res.first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Result not found.")
+    result, pu, agent = row
+
+    pings = []
+    if agent is not None:
+        stmt = (
+            select(AgentLocationPing)
+            .where(AgentLocationPing.agent_id == agent.id)
+            .order_by(AgentLocationPing.recorded_at)
+        )
+        # Only the trail relevant to this collation window: from the agent's
+        # last check-in onwards (check-in time is refreshed at verify-entry).
+        if agent.last_check_in is not None:
+            stmt = stmt.where(AgentLocationPing.recorded_at >= agent.last_check_in)
+        ping_res = await db.execute(stmt)
+        for p in ping_res.scalars().all():
+            pings.append({
+                "lat": p.latitude,
+                "lng": p.longitude,
+                "at": p.recorded_at.isoformat() if p.recorded_at else None,
+                "outside_geofence": p.outside_geofence,
+                "distance_m": p.distance_m,
+            })
+
+    anchor = None
+    if pu is not None and pu.expected_latitude and pu.expected_longitude:
+        try:
+            anchor = {"lat": float(pu.expected_latitude),
+                      "lng": float(pu.expected_longitude)}
+        except (TypeError, ValueError):
+            anchor = None
+
+    return {
+        "result_id": result.id,
+        "pu_code": pu.pu_code if pu else None,
+        "pu_name": pu.name if pu else None,
+        "agent_email": agent.email if agent else None,
+        "gps_trail_flag": result.gps_trail_flag,
+        "anchor": anchor,
+        "geofence_radius_m": _geofence_radius(),
+        "check_in": ({
+            "lat": agent.check_in_lat,
+            "lng": agent.check_in_lng,
+            "at": agent.last_check_in.isoformat() if agent.last_check_in else None,
+        } if agent else None),
+        "submission": ({
+            "lat": result.latitude,
+            "lng": result.longitude,
+            "at": result.uploaded_at.isoformat() if result.uploaded_at else None,
+        }),
+        "pings": pings,
+    }
+
+
+def _geofence_radius() -> float:
+    import os as _os
+    return float(_os.environ.get("GEOFENCE_RADIUS_METRES", "200"))

@@ -49,7 +49,8 @@ async def main():
     print(f"usable coords: {len(coords)} ({n_addr_only} address-only skipped)",
           flush=True)
 
-    conn = await asyncpg.connect(os.environ["DATABASE_URL"])
+    dsn = os.environ["DATABASE_URL"].replace("postgresql+asyncpg://", "postgresql://", 1)
+    conn = await asyncpg.connect(dsn)
     try:
         await conn.execute(
             "CREATE TEMP TABLE c (code text PRIMARY KEY, lat text, lng text)")
