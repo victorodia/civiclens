@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .db import get_db
 from .models import (
     User, Election, ElectionPU, AgentAssignment, AgentCheckIn,
-    PollingUnit, Ward, LGA, State, Result,
+    PollingUnit, Ward, LGA, State, Result, Client,
 )
 from .security import RequirePermission, log_audit
 
@@ -27,11 +27,105 @@ VALID_TYPES = {"general", "presidential", "gubernatorial", "senatorial",
                "house_of_reps", "lga"}
 VALID_STATUSES = {"upcoming", "live", "closed"}
 
+INTERNAL_CLIENT_ID = "civiclens-internal"
+
+
+async def client_scope_election_ids(db: AsyncSession, user: User):
+    """
+    Election visibility for this admin: None = platform super-admin
+    (cross-client, sees every election); otherwise the id list of the
+    elections owned by the caller's client.
+    """
+    if getattr(user, "client_id", None) is None:
+        return None
+    rows = await db.execute(select(Election.id).where(Election.client_id == user.client_id))
+    return [r[0] for r in rows.all()]
+
+
+def assert_in_scope(election_id: str, scoped_ids):
+    """Raise 404 (not 403 — don't reveal existence) for out-of-scope access."""
+    if scoped_ids is not None and election_id not in scoped_ids:
+        raise HTTPException(404, "Election not found.")
+
+
+class ClientCreateSchema(BaseModel):
+    name: str
+    contact_email: Optional[str] = None
+    notes: Optional[str] = None
+
+
+def _client_to_dict(c: Client, counts: dict) -> dict:
+    return {
+        "id": c.id,
+        "name": c.name,
+        "contact_email": c.contact_email,
+        "notes": c.notes,
+        "elections": counts.get("elections", 0),
+        "agents": counts.get("agents", 0),
+        "created_at": c.created_at.isoformat() if c.created_at else None,
+    }
+
+
+@router.get("/clients")
+async def list_clients(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(RequirePermission("provision_agents")),
+):
+    """
+    Platform admins list every institution; a client admin sees only their
+    own client.
+    """
+    stmt = select(Client).order_by(Client.created_at)
+    if user.client_id is not None:
+        stmt = stmt.where(Client.id == user.client_id)
+    clients = (await db.execute(stmt)).scalars().all()
+
+    counts = {}
+    if clients:
+        ids = [c.id for c in clients]
+        e_rows = (await db.execute(
+            select(Election.client_id, func.count())
+            .where(Election.client_id.in_(ids)).group_by(Election.client_id))).all()
+        a_rows = (await db.execute(
+            select(User.client_id, func.count())
+            .where(User.client_id.in_(ids), User.role == "agent")
+            .group_by(User.client_id))).all()
+        for cid, n in e_rows:
+            counts.setdefault(cid, {})["elections"] = n
+        for cid, n in a_rows:
+            counts.setdefault(cid, {})["agents"] = n
+    return {"clients": [_client_to_dict(c, counts.get(c.id, {})) for c in clients]}
+
+
+@router.post("/clients", status_code=201)
+async def create_client(
+    payload: ClientCreateSchema,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(RequirePermission("provision_agents")),
+):
+    """Platform-admin only: client-admin accounts cannot create institutions."""
+    if user.client_id is not None:
+        raise HTTPException(status_code=403, detail="Only platform administrators may create clients.")
+    name = payload.name.strip()
+    existing = (await db.execute(select(Client).where(Client.name == name))).scalar_one_or_none()
+    if existing:
+        raise HTTPException(409, f"A client named {name!r} already exists.")
+    client = Client(name=name, contact_email=payload.contact_email, notes=payload.notes)
+    db.add(client)
+    await log_audit(db, actor_id=str(user.id), action="CLIENT_CREATE",
+                    target_id=client.id, details=f"Created client {name!r}")
+    await db.commit()
+    await db.refresh(client)
+    return _client_to_dict(client, {})
+
 
 class ElectionCreateSchema(BaseModel):
     name: str
     code: str
     type: str = "general"
+    # Platform admins only: owning client (defaults to the internal client).
+    # Client admins cannot set this — their own client is enforced.
+    client_id: Optional[str] = None
     party_a_name: Optional[str] = None
     party_b_name: Optional[str] = None
     party_c_name: Optional[str] = None
@@ -74,9 +168,14 @@ def _election_to_dict(e: Election, counts: dict) -> dict:
 @router.get("/elections")
 async def list_elections(
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(RequirePermission("view_results")),
+    user: User = Depends(RequirePermission("view_results")),
 ):
-    elections = (await db.execute(select(Election).order_by(Election.created_at))).scalars().all()
+    # Client admins only ever see their own institution's elections; the
+    # switcher in the admin portal renders exactly this list.
+    stmt = select(Election).order_by(Election.created_at)
+    if user.client_id is not None:
+        stmt = stmt.where(Election.client_id == user.client_id)
+    elections = (await db.execute(stmt)).scalars().all()
 
     counts = {}
     if elections:
@@ -116,7 +215,18 @@ async def create_election(
     if existing:
         raise HTTPException(409, f"Election code {code} already exists.")
 
+    # Ownership: client admins can only ever create elections for their own
+    # institution; platform admins pick a client (defaulting to internal).
+    if user.client_id is not None:
+        client_id = user.client_id
+    else:
+        client_id = payload.client_id or INTERNAL_CLIENT_ID
+        client = (await db.execute(select(Client).where(Client.id == client_id))).scalar_one_or_none()
+        if not client:
+            raise HTTPException(404, "Client not found.")
+
     election = Election(
+        client_id=client_id,
         name=payload.name.strip(),
         code=code,
         type=payload.type,
@@ -146,6 +256,7 @@ async def set_election_status(
     election = (await db.execute(select(Election).where(Election.id == election_id))).scalar_one_or_none()
     if not election:
         raise HTTPException(404, "Election not found.")
+    assert_in_scope(election.id, await client_scope_election_ids(db, user))
 
     election.status = payload.status
     await log_audit(db, actor_id=str(user.id), action="ELECTION_STATUS",
@@ -170,6 +281,7 @@ async def set_election_scope(
     election = (await db.execute(select(Election).where(Election.id == election_id))).scalar_one_or_none()
     if not election:
         raise HTTPException(404, "Election not found.")
+    assert_in_scope(election.id, await client_scope_election_ids(db, user))
     if not payload.state_ids and not payload.lga_ids:
         raise HTTPException(422, "Provide state_ids and/or lga_ids.")
 
@@ -220,8 +332,9 @@ async def set_election_scope(
 async def list_election_assignments(
     election_id: str,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(RequirePermission("view_agents")),
+    user: User = Depends(RequirePermission("view_agents")),
 ):
+    assert_in_scope(election_id, await client_scope_election_ids(db, user))
     rows = (await db.execute(
         select(AgentAssignment, User, PollingUnit)
         .join(User, AgentAssignment.agent_id == User.id)
@@ -252,6 +365,15 @@ async def create_assignment(
     election = (await db.execute(select(Election).where(Election.id == payload.election_id))).scalar_one_or_none()
     if not election:
         raise HTTPException(404, "Election not found.")
+    assert_in_scope(election.id, await client_scope_election_ids(db, user))
+    # Tenancy: an agent can only ever be accredited within their own
+    # institution's elections. Client admins may touch only their own
+    # agents; platform admins may touch any agent but the election/agent
+    # client must still match.
+    if user.client_id is not None and agent.client_id != user.client_id:
+        raise HTTPException(404, "Agent not found.")
+    if agent.client_id is not None and agent.client_id != election.client_id:
+        raise HTTPException(422, "This agent belongs to a different institution than the election.")
     in_scope = (await db.execute(select(ElectionPU).where(
         ElectionPU.election_id == election.id,
         ElectionPU.pu_id == payload.pu_id))).scalar_one_or_none()
@@ -287,6 +409,7 @@ async def delete_assignment(
         AgentAssignment.agent_id == agent_id))).scalar_one_or_none()
     if not assignment:
         raise HTTPException(404, "Assignment not found.")
+    assert_in_scope(assignment.election_id, await client_scope_election_ids(db, user))
     # Deactivate any live check-in session for that election
     await db.execute(
         text("UPDATE agent_checkins SET is_active = false "

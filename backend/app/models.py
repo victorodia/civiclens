@@ -45,6 +45,10 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    # Owning institution. NULL = platform super-admin (CivicLens staff) with
+    # cross-client visibility. Agents and client operator accounts carry
+    # their institution's id and are server-side restricted to it.
+    client_id = Column(String(36), ForeignKey("clients.id"), nullable=True, index=True)
     email = Column(String(100), unique=True, index=True, nullable=False)
     hashed_password = Column(String(255), nullable=False) # Argon2 hash
     hashed_duress_password = Column(String(255), nullable=True) # Secondary hash for hostage situations
@@ -209,6 +213,10 @@ class Election(Base):
     __tablename__ = "elections"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    # Owning institution. Elections are contractual work for a client; the
+    # client boundary keeps one institution's people and data invisible to
+    # another's. Backfilled to the internal CivicLens client.
+    client_id = Column(String(36), ForeignKey("clients.id"), nullable=True, index=True)
     name = Column(String(200), nullable=False)
     code = Column(String(30), unique=True, nullable=False, index=True)
     # general | presidential | gubernatorial | senatorial | house_of_reps | lga
@@ -272,3 +280,19 @@ class AgentCheckIn(Base):
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
     is_active = Column(Boolean, default=True, index=True)
+
+
+class Client(Base):
+    """
+    An institution that contracts CivicLens to monitor an election. Clients
+    own elections, agents and operator accounts; one client's data is
+    invisible to another's. Platform staff have client_id NULL on their user
+    row and see everything.
+    """
+    __tablename__ = "clients"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String(200), nullable=False)
+    contact_email = Column(String(100), nullable=True)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)

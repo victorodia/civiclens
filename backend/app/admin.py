@@ -84,7 +84,12 @@ async def approve_result(result_id: str, action: str, db: AsyncSession = Depends
     
     if not result:
         raise HTTPException(status_code=404, detail="Result not found.")
-        
+
+    # Client tenancy: verifying another institution's result is indistinguishable
+    # from verifying a non-existent one.
+    from .elections import client_scope_election_ids, assert_in_scope
+    assert_in_scope(result.election_id, await client_scope_election_ids(db, user))
+
     from .security import log_audit, get_current_user, RequirePermission
     
     if action.upper() == 'APPROVE':
@@ -120,6 +125,9 @@ class ProvisionSchema(BaseModel):
     # agent_assignments row is created in addition to the legacy PU pointer),
     # which is required for them to check in and submit in that election.
     election_id: Optional[str] = None
+    # Platform admins only: force the owning client. Client admins cannot set
+    # this — their own institution is enforced automatically.
+    client_id: Optional[str] = None
 
 @router.post("/provision-agents")
 async def provision_new_agents(payload: ProvisionSchema, db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("provision_agents"))):
@@ -129,11 +137,27 @@ async def provision_new_agents(payload: ProvisionSchema, db: AsyncSession = Depe
     """
     from .models import Election, ElectionPU, AgentAssignment
 
+    # Tenancy: client admins provision only for their own institution.
+    if user.client_id is not None:
+        agent_client_id = user.client_id
+    else:
+        agent_client_id = payload.client_id
+        if agent_client_id:
+            from .models import Client as _Client
+            client = (await db.execute(select(_Client).where(_Client.id == agent_client_id))).scalar_one_or_none()
+            if not client:
+                raise HTTPException(404, "Client not found.")
+
     # Validate election + PU scope up front (fail fast, before any insert)
     election = None
     if payload.election_id:
         election = (await db.execute(select(Election).where(Election.id == payload.election_id))).scalar_one_or_none()
         if not election:
+            raise HTTPException(404, "Election not found.")
+        # Tenancy: the election must belong to the client the agents are
+        # being provisioned for (client admins always provision for their
+        # own institution; platform admins may pass client_id explicitly).
+        if agent_client_id is not None and election.client_id != agent_client_id:
             raise HTTPException(404, "Election not found.")
         in_scope = (await db.execute(select(ElectionPU).where(
             ElectionPU.election_id == election.id,
@@ -149,6 +173,11 @@ async def provision_new_agents(payload: ProvisionSchema, db: AsyncSession = Depe
         existing_res = await db.execute(select(User).where(User.email == email))
         existing_user = existing_res.scalar_one_or_none()
         if existing_user:
+            # Tenancy: a client admin cannot pull another institution's
+            # agent into their election via the re-accreditation path.
+            if agent_client_id is not None and existing_user.client_id != agent_client_id:
+                results[email] = {"error": "Agent belongs to another institution"}
+                continue
             # Already a user: just (re)accredit for this election if asked
             if election:
                 clash = (await db.execute(select(AgentAssignment).where(
@@ -182,9 +211,13 @@ async def provision_new_agents(payload: ProvisionSchema, db: AsyncSession = Depe
             requires_password_reset=True,
             device_fingerprint="MOCKED_PHONE_ID",
             device_signing_key=signing_key,
-            assigned_pu_id=payload.polling_unit_id
+            assigned_pu_id=payload.polling_unit_id,
+            client_id=agent_client_id
         )
         db.add(new_agent)
+        # Flush so the users row physically exists before the assignment's
+        # FK references it (no ORM relationship lets SQLAlchemy infer order).
+        await db.flush()
         if election:
             db.add(AgentAssignment(agent_id=new_agent.id, election_id=election.id,
                                    pu_id=payload.polling_unit_id))
@@ -206,7 +239,11 @@ async def get_all_agents(db: AsyncSession = Depends(get_db), user: User = Depend
     """
     from sqlalchemy import select
     from .models import User
-    result = await db.execute(select(User).where(User.role == "agent"))
+    stmt = select(User).where(User.role == "agent")
+    # Client tenancy: client admins see only their own institution's agents.
+    if user.client_id is not None:
+        stmt = stmt.where(User.client_id == user.client_id)
+    result = await db.execute(stmt)
     agents = result.scalars().all()
     
     return [
@@ -411,6 +448,10 @@ async def get_workforce_monitor(
         Result, PollingUnit.id == Result.pu_id, isouter=True
     ).where(User.role == "agent")
 
+    # Client tenancy: client admins monitor only their own institution's agents.
+    if user.client_id is not None:
+        stmt = stmt.where(User.client_id == user.client_id)
+
     # Apply Filters
     if state_id: stmt = stmt.where(State.id == state_id)
     if lga_id: stmt = stmt.where(LGA.id == lga_id)
@@ -467,6 +508,11 @@ async def get_unassigned_pus(
 
     # Build the base query for gaps
     # We join with User where User is assigned to the PU, and look for NULL matches
+    # Client tenancy: only agents of the caller's institution count as coverage.
+    coverage = User
+    coverage_filters = [PollingUnit.id == User.assigned_pu_id]
+    if user.client_id is not None:
+        coverage_filters.append(User.client_id == user.client_id)
     stmt = select(PollingUnit, Ward, LGA, State).join(
         Ward, PollingUnit.ward_id == Ward.id
     ).join(
@@ -474,7 +520,7 @@ async def get_unassigned_pus(
     ).join(
         State, LGA.state_id == State.id
     ).outerjoin(
-        User, PollingUnit.id == User.assigned_pu_id
+        User, *coverage_filters
     ).where(User.id.is_(None))
 
     # Apply Geo Filters
@@ -490,7 +536,7 @@ async def get_unassigned_pus(
     ).join(
         State, LGA.state_id == State.id
     ).outerjoin(
-        User, PollingUnit.id == User.assigned_pu_id
+        User, *coverage_filters
     ).where(User.id.is_(None))
     
     if state_id: count_stmt = count_stmt.where(State.id == state_id)
@@ -536,6 +582,16 @@ async def get_live_stats(
     print(f"[TELEMETRY] Live Collation Request Received: state={state_id}, lga={lga_id}, ward={ward_id}, pu={pu_id}")
     from sqlalchemy import select, func
     from .models import User, Result, PollingUnit, Ward, LGA, State
+    from .elections import client_scope_election_ids
+
+    # Client tenancy: a client admin's aggregates cover only their own
+    # institution's agents and elections. Platform admins (client_id NULL)
+    # keep the cross-client view.
+    scoped_ids = await client_scope_election_ids(db, user)
+    def scope_result(stmt):
+        return stmt.where(Result.election_id.in_(scoped_ids)) if scoped_ids is not None else stmt
+    def scope_agent(stmt):
+        return stmt.where(User.client_id == user.client_id) if user.client_id is not None else stmt
 
     # Helper function to apply geographic filters via joins
     def apply_filters(stmt, table):
@@ -562,19 +618,19 @@ async def get_live_stats(
         return stmt
 
     # 1. Agents Provisioned
-    agent_count_stmt = select(func.count(User.id)).where(User.role == "agent")
+    agent_count_stmt = scope_agent(select(func.count(User.id)).where(User.role == "agent"))
     if any([state_id, lga_id, ward_id, pu_id]):
         agent_count_stmt = apply_filters(agent_count_stmt, User)
-    
+
     agent_count_res = await db.execute(agent_count_stmt)
     agents_provisioned = agent_count_res.scalar() or 0
 
     # 2. Vote Tallies
-    votes_stmt = select(
+    votes_stmt = scope_result(select(
         func.sum(Result.party_a_votes),
         func.sum(Result.party_b_votes),
         func.sum(Result.party_c_votes)
-    )
+    ))
     if any([state_id, lga_id, ward_id, pu_id]):
         votes_stmt = apply_filters(votes_stmt, Result)
         
@@ -587,7 +643,7 @@ async def get_live_stats(
     total_votes = pa + pb + pc
 
     # 3. Integrity Verified Percentage
-    res_count_stmt = select(func.count(Result.id))
+    res_count_stmt = scope_result(select(func.count(Result.id)))
     if any([state_id, lga_id, ward_id, pu_id]):
         res_count_stmt = apply_filters(res_count_stmt, Result)
         
@@ -603,7 +659,7 @@ async def get_live_stats(
         verified_percentage = 0.0
 
     # 4. Flagged for Review Count
-    flagged_stmt = select(func.count(Result.id)).where(Result.is_flagged == True, Result.is_verified == False)
+    flagged_stmt = scope_result(select(func.count(Result.id)).where(Result.is_flagged == True, Result.is_verified == False))
     if any([state_id, lga_id, ward_id, pu_id]):
         flagged_stmt = apply_filters(flagged_stmt, Result)
     
@@ -812,17 +868,22 @@ async def get_all_documents(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(RequirePermission("view_results")),
+    user: User = Depends(RequirePermission("view_results")),
 ):
     """
     Document feed for the admin portal: every collated result with its
     evidence, geography breakdown, and on-chain anchor. Paginated, searchable
     by PU code/name, and filterable by upload date (YYYY-MM-DD).
+    Scoped to the caller's institution's elections.
     """
     from sqlalchemy import and_
     from datetime import datetime as _dt
+    from .elections import client_scope_election_ids
 
     conditions = []
+    scoped_ids = await client_scope_election_ids(db, user)
+    if scoped_ids is not None:
+        conditions.append(Result.election_id.in_(scoped_ids))
     if search:
         like = f"%{search}%"
         conditions.append(
@@ -874,16 +935,22 @@ async def get_all_documents(
 @router.get("/pending-verifications")
 async def get_pending_verifications(
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(RequirePermission("view_results")),
+    user: User = Depends(RequirePermission("view_results")),
 ):
     """
     AI review queue: results the OCR flagged as diverging from the agent's
     entered figures, not yet cleared by a human verifier.
+    Scoped to the caller's institution's elections.
     """
+    from .elections import client_scope_election_ids
+    conditions = [Result.is_flagged.is_(True), Result.is_verified.is_(False)]
+    scoped_ids = await client_scope_election_ids(db, user)
+    if scoped_ids is not None:
+        conditions.append(Result.election_id.in_(scoped_ids))
     stmt = (
         select(Result, PollingUnit)
         .join(PollingUnit, Result.pu_id == PollingUnit.id)
-        .where(Result.is_flagged.is_(True), Result.is_verified.is_(False))
+        .where(*conditions)
         .order_by(Result.uploaded_at.desc())
     )
     res = await db.execute(stmt)
@@ -928,6 +995,11 @@ async def get_result_presence_trail(
     if not row:
         raise HTTPException(status_code=404, detail="Result not found.")
     result, pu, agent = row
+
+    # Client tenancy: out-of-scope results must be indistinguishable from
+    # non-existent ones.
+    from .elections import client_scope_election_ids, assert_in_scope
+    assert_in_scope(result.election_id, await client_scope_election_ids(db, user))
 
     pings = []
     if agent is not None:
@@ -1008,6 +1080,16 @@ async def get_monitor_map(
     """
     import time as _time
     from sqlalchemy import text as _text
+    from .elections import client_scope_election_ids, assert_in_scope
+
+    # Client tenancy: a scoped map is only for elections the caller's
+    # institution owns; the nationwide aggregate view is platform-admin only
+    # (a client must pick their election to avoid cross-client leakage).
+    if election_id:
+        assert_in_scope(election_id, await client_scope_election_ids(db, _))
+    elif getattr(_, "client_id", None) is not None:
+        raise HTTPException(status_code=403,
+                            detail="Select an election to view its map.")
 
     now = _time.time()
     if election_id:
