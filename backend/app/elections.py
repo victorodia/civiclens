@@ -11,7 +11,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy import select, func, delete, text, insert, literal
+from sqlalchemy import select, func, delete, text, insert, literal, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import get_db
@@ -361,22 +361,24 @@ async def set_election_scope(
     if not payload.state_ids and not payload.lga_ids:
         raise HTTPException(422, "Provide state_ids and/or lga_ids.")
 
-    # Resolve the target PU set
-    pu_ids = set()
+    # Resolve the target PU set PURELY IN SQL. Materializing thousands of PU
+    # ids into Python and replaying them as an IN(...) list OOM-killed
+    # workers on whole-state scopes (956MB VM); the database does this set
+    # work natively in one round-trip.
+    conds = []
     if payload.state_ids:
-        rows = (await db.execute(
-            select(PollingUnit.id)
-            .join(Ward, PollingUnit.ward_id == Ward.id)
-            .join(LGA, Ward.lga_id == LGA.id)
-            .where(LGA.state_id.in_(payload.state_ids)))).all()
-        pu_ids.update(r[0] for r in rows)
+        conds.append(LGA.state_id.in_(payload.state_ids))
     if payload.lga_ids:
-        rows = (await db.execute(
-            select(PollingUnit.id)
-            .join(Ward, PollingUnit.ward_id == Ward.id)
-            .where(Ward.lga_id.in_(payload.lga_ids)))).all()
-        pu_ids.update(r[0] for r in rows)
-    if not pu_ids:
+        conds.append(Ward.lga_id.in_(payload.lga_ids))
+    scope_select = (
+        select(PollingUnit.id)
+        .join(Ward, PollingUnit.ward_id == Ward.id)
+        .join(LGA, Ward.lga_id == LGA.id)
+        .where(or_(*conds))
+    )
+    n_pus = (await db.execute(
+        select(func.count()).select_from(scope_select.subquery()))).scalar_one()
+    if not n_pus:
         raise HTTPException(422, "The selected states/LGAs contain no polling units.")
 
     # Replace scope (single round-trip via DELETE + INSERT-from-SELECT)
@@ -384,7 +386,10 @@ async def set_election_scope(
     await db.execute(
         insert(ElectionPU).from_select(
             ["election_id", "pu_id"],
-            select(literal(election_id), PollingUnit.id).where(PollingUnit.id.in_(pu_ids))
+            select(literal(election_id), PollingUnit.id)
+            .join(Ward, PollingUnit.ward_id == Ward.id)
+            .join(LGA, Ward.lga_id == LGA.id)
+            .where(or_(*conds))
         )
     )
     # Drop assignments that fell outside the new scope
@@ -396,12 +401,12 @@ async def set_election_scope(
     )
     await log_audit(db, actor_id=str(user.id), action="ELECTION_SCOPE",
                     target_id=election.id,
-                    details=f"Scope set to {len(pu_ids)} PUs "
+                    details=f"Scope set to {n_pus} PUs "
                             f"({len(payload.state_ids or [])} states, "
                             f"{len(payload.lga_ids or [])} LGAs); "
                             f"{getattr(removed, 'rowcount', '?')} assignments dropped")
     await db.commit()
-    return {"status": "success", "election_id": election_id, "pus": len(pu_ids)}
+    return {"status": "success", "election_id": election_id, "pus": n_pus}
 
 
 @router.get("/elections/{election_id}/assignments")
