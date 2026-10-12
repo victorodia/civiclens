@@ -25,6 +25,36 @@ function LiveMapGate({ setActiveView }) {
   return <MonitorMap setActiveView={setActiveView} electionId={activeElectionId || null} />;
 }
 
+// Institution (client) tenancy badge: shows which institution's election
+// space the signed-in admin is working in. Platform super-admins (no
+// client_id on their account) get a "PLATFORM" chip instead.
+function ClientBadge() {
+  const [clientName, setClientName] = useState(() => {
+    try { return localStorage.getItem('adminClientName') || ''; } catch (e) { return ''; }
+  });
+  // Re-read after login without a full reload: storage events don't fire in
+  // the same tab, so poll cheaply while the name is still empty.
+  React.useEffect(() => {
+    if (clientName) return undefined;
+    const t = setInterval(() => {
+      try {
+        const v = localStorage.getItem('adminClientName') || '';
+        if (v) { setClientName(v); clearInterval(t); }
+      } catch (e) { /* ignore */ }
+    }, 1000);
+    return () => clearInterval(t);
+  }, [clientName]);
+  if (!clientName) return null;
+  return (
+    <span
+      title={clientName === '__PLATFORM__' ? 'Platform super-admin — cross-institution access' : `Institution: ${clientName}`}
+      className="ml-2 bg-white/15 border border-white/25 rounded-lg text-[9px] font-black uppercase tracking-widest px-2 py-1.5 max-w-[160px] truncate"
+    >
+      {clientName === '__PLATFORM__' ? '🌐 Platform' : `🏛 ${clientName}`}
+    </span>
+  );
+}
+
 function ElectionSwitcher() {
   const { elections, activeElectionId, setActiveElection } = useElection();
   if (!elections.length) return null;
@@ -70,6 +100,7 @@ function LayoutShell({ children, activeView, setActiveView, onLogout, walletStat
               CL
             </div>
             <h1 className="text-base font-black tracking-[0.15em] uppercase">ADMIN PORTAL</h1>
+            <ClientBadge />
             <ElectionSwitcher />
           </div>
 

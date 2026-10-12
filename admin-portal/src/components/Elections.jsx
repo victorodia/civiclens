@@ -142,12 +142,32 @@ const Elections = ({ setActiveView }) => {
     const { showNotification } = useNotification();
     const [showCreate, setShowCreate] = useState(false);
     const [scopeFor, setScopeFor] = useState(null);
-    const [form, setForm] = useState({ name: '', code: '', type: 'gubernatorial', party_a_name: '', party_b_name: '', party_c_name: '' });
+    const [form, setForm] = useState({ name: '', code: '', type: 'gubernatorial', party_a_name: '', party_b_name: '', party_c_name: '', client_id: '' });
     const [saving, setSaving] = useState(false);
+
+    // Institution tenancy: platform super-admins (no client_id of their own)
+    // must pick which institution an election belongs to. Client admins are
+    // locked to their own institution and never see this picker.
+    const myClientId = (() => { try { return localStorage.getItem('adminClientId') || ''; } catch (e) { return ''; } })();
+    const isPlatformAdmin = !myClientId;
+    const [clients, setClients] = useState([]);
+    useEffect(() => {
+        if (!isPlatformAdmin || !showCreate) return;
+        let cancelled = false;
+        fetch('/admin/clients')
+            .then(r => (r.ok ? r.json() : { clients: [] }))
+            .then(d => { if (!cancelled) setClients(d.clients || []); })
+            .catch(() => {});
+        return () => { cancelled = true; };
+    }, [isPlatformAdmin, showCreate]);
 
     const create = async () => {
         if (!form.name.trim() || !form.code.trim()) {
             showNotification('Name and short code are required.', 'warning');
+            return;
+        }
+        if (isPlatformAdmin && !form.client_id) {
+            showNotification('Pick the institution this election belongs to.', 'warning');
             return;
         }
         setSaving(true);
@@ -155,12 +175,12 @@ const Elections = ({ setActiveView }) => {
             const res = await fetch('/admin/elections', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(form),
+                body: JSON.stringify(isPlatformAdmin ? form : { ...form, client_id: undefined }),
             });
             const data = await res.json().catch(() => ({}));
             if (res.ok) {
                 showNotification(`Election "${data.name}" created. Now set its scope.`, 'success');
-                setForm({ name: '', code: '', type: 'gubernatorial', party_a_name: '', party_b_name: '', party_c_name: '' });
+                setForm({ name: '', code: '', type: 'gubernatorial', party_a_name: '', party_b_name: '', party_c_name: '', client_id: '' });
                 setShowCreate(false);
                 await refresh();
                 setScopeFor(data.id);
@@ -215,6 +235,13 @@ const Elections = ({ setActiveView }) => {
                             {TYPES.map(t => <option key={t} value={t}>{TYPE_LABEL[t]}</option>)}
                         </select>
                     </div>
+                    {isPlatformAdmin && (
+                        <select value={form.client_id} onChange={e => setForm({ ...form, client_id: e.target.value })}
+                            className="w-full text-xs px-3 py-2 rounded-lg border border-brand/50 dark:border-gray-700 bg-transparent font-bold">
+                            <option value="">— Institution this election belongs to —</option>
+                            {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                        </select>
+                    )}
                     <div className="grid grid-cols-3 gap-2">
                         {['party_a_name', 'party_b_name', 'party_c_name'].map(k => (
                             <input key={k} value={form[k]} onChange={e => setForm({ ...form, [k]: e.target.value })}
@@ -243,6 +270,9 @@ const Elections = ({ setActiveView }) => {
                                 <span className={`text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full ${STATUS_STYLE[e.status] || STATUS_STYLE.upcoming}`}>{e.status}</span>
                             </div>
                             <p className="text-[10px] text-gray-400 font-mono">{e.code} · {TYPE_LABEL[e.type] || e.type}</p>
+                            {isPlatformAdmin && e.client_name && (
+                                <p className="text-[9px] text-brand/80 dark:text-brand font-bold uppercase tracking-widest">🏛 {e.client_name}</p>
+                            )}
                         </div>
                         <select value={e.status} onChange={ev => setStatus(e, ev.target.value)}
                             className="text-[10px] bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-2 py-1">

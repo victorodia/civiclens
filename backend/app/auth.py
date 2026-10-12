@@ -172,10 +172,23 @@ async def login(
                 "checked_in_at": on_site_by_election[el.id].isoformat() if el.id in on_site_by_election else None,
             })
 
+    # Institution (client) tenancy label: NULL client_id = platform super-admin
+    # and sees every institution; otherwise the portal header shows the
+    # admin's owning institution so there is never ambiguity about which
+    # election space they are working in.
+    client_id = getattr(user, "client_id", None)
+    client_name = None
+    if client_id:
+        from .models import Client as _Client
+        _c = (await db.execute(select(_Client).where(_Client.id == client_id))).scalar_one_or_none()
+        client_name = _c.name if _c else None
+
     return {
-        "access_token": access_token, 
+        "access_token": access_token,
         "token_type": "bearer",
         "role": user.role,
+        "client_id": client_id,
+        "client_name": client_name,
         "requires_password_reset": False,
         "assigned_pu": assigned_pu,
         "assignments": assignments,

@@ -162,6 +162,7 @@ def _election_to_dict(e: Election, counts: dict) -> dict:
         "submitted": counts.get("submitted", 0),
         "pus": counts.get("pus", 0),
         "created_at": e.created_at.isoformat() if e.created_at else None,
+        "client_name": counts.get("client_name"),
     }
 
 
@@ -198,6 +199,15 @@ async def list_elections(
             counts.setdefault(eid, {})["submitted"] = n
         for eid, n in pu_rows:
             counts.setdefault(eid, {})["pus"] = n
+
+    # Platform admins see which institution each election belongs to; client
+    # admins only ever list their own, so the label would be redundant noise.
+    if user.client_id is None and elections:
+        from .models import Client as _Client
+        c_rows = (await db.execute(select(_Client.id, _Client.name))).all()
+        c_map = {cid: name for cid, name in c_rows}
+        for e in elections:
+            counts.setdefault(e.id, {})["client_name"] = c_map.get(e.client_id)
 
     return {"elections": [_election_to_dict(e, counts.get(e.id, {})) for e in elections]}
 

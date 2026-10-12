@@ -3,6 +3,18 @@ import { Shield, Lock, Mail, Loader2, Eye, EyeOff } from 'lucide-react';
 import { useNotification } from '../contexts/NotificationContext';
 
 const LoginScreen = ({ onLoginSuccess, onRequireReset }) => {
+    // Institution (client) tenancy: the backend tags every login with the
+    // admin's owning institution (client_id NULL = platform super-admin).
+    // We persist it so the header can label the admin's election space.
+    const persistClientInfo = (data) => {
+        try {
+            localStorage.setItem('adminClientId', data.client_id || '');
+            // client_id NULL on an admin = platform super-admin; the header
+            // renders a "Platform" chip for those.
+            localStorage.setItem('adminClientName', data.client_name
+                || (data.client_id ? '' : '__PLATFORM__'));
+        } catch (e) { /* storage full/blocked — header just shows nothing */ }
+    };
     const { showNotification } = useNotification();
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
@@ -108,6 +120,7 @@ const LoginScreen = ({ onLoginSuccess, onRequireReset }) => {
                 setStep('mfa');
                 showNotification("Primary Credentials Authenticated. MFA Required.", "info");
             } else if (data.access_token) {
+                persistClientInfo(data);
                 onLoginSuccess(data.access_token, data.role);
                 showNotification("Login Successful.", "success");
             }
@@ -156,6 +169,7 @@ const LoginScreen = ({ onLoginSuccess, onRequireReset }) => {
             }
 
             if (data.access_token) {
+                persistClientInfo(data);
                 onLoginSuccess(data.access_token, data.role);
             } else {
                 throw new Error(data.message || 'Invalid MFA Code.');
