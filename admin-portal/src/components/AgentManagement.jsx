@@ -37,7 +37,45 @@ const AgentManagement = () => {
     useEffect(() => {
         fetchAgents();
         fetchStates();
+        fetchTenancyOptions();
     }, []);
+
+    // Institution + election pickers for provisioning. Platform super-admins
+    // must choose the owning institution (else the agent belongs to no
+    // tenant); the election list is then limited to that institution's races.
+    const isPlatformAdmin = (() => {
+        try { return !localStorage.getItem('adminClientId'); } catch (e) { return false; }
+    })();
+    const [clients, setClients] = useState([]);
+    const [elections, setElections] = useState([]);
+    const [selectedClient, setSelectedClient] = useState('');
+    const [selectedElection, setSelectedElection] = useState('');
+
+    const fetchTenancyOptions = async () => {
+        try {
+            const [cRes, eRes] = await Promise.all([
+                isPlatformAdmin ? fetch('/admin/clients') : Promise.resolve(null),
+                fetch('/admin/elections'),
+            ]);
+            if (cRes && cRes.ok) {
+                const cData = await cRes.json();
+                setClients(cData.clients || []);
+            }
+            if (eRes.ok) {
+                const eData = await eRes.json();
+                setElections(eData.elections || []);
+            }
+        } catch (e) { console.error(e); }
+    };
+
+    const visibleElections = isPlatformAdmin
+        ? elections.filter(e => e.client_id === selectedClient)
+        : elections;
+
+    const handleClientChange = (clientId) => {
+        setSelectedClient(clientId);
+        setSelectedElection('');
+    };
 
     const fetchStates = async () => {
         try {
@@ -110,6 +148,7 @@ const AgentManagement = () => {
     const handleProvision = async (e) => {
         e.preventDefault();
         if (!selectedPu) return showNotification("Please select a Polling Unit first.", "warning");
+        if (isPlatformAdmin && !selectedClient) return showNotification("Pick the institution this agent belongs to.", "warning");
         setIsProvisioning(true);
         setProvisionedCreds(null);
 
@@ -119,7 +158,9 @@ const AgentManagement = () => {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     emails: [newAgentEmail],
-                    polling_unit_id: selectedPu
+                    polling_unit_id: selectedPu,
+                    ...(isPlatformAdmin ? { client_id: selectedClient } : {}),
+                    ...(selectedElection ? { election_id: selectedElection } : {}),
                 })
             });
 
@@ -257,6 +298,26 @@ const AgentManagement = () => {
 
                 {!provisionedCreds ? (
                     <form onSubmit={handleProvision} className="space-y-4">
+                        {isPlatformAdmin && (
+                            <select
+                                value={selectedClient}
+                                onChange={(e) => handleClientChange(e.target.value)}
+                                className="w-full px-4 py-3 rounded-xl border border-brand/50 dark:border-gray-700 bg-gray-50 dark:bg-gray-950 text-[10px] font-black uppercase outline-none focus:ring-2 focus:ring-brand"
+                            >
+                                <option value="">— Institution this agent belongs to —</option>
+                                {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                            </select>
+                        )}
+                        {visibleElections.length > 0 && (
+                            <select
+                                value={selectedElection}
+                                onChange={(e) => setSelectedElection(e.target.value)}
+                                className="w-full px-4 py-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-950 text-[10px] font-black uppercase outline-none focus:ring-2 focus:ring-brand"
+                            >
+                                <option value="">Accredit for election (optional)</option>
+                                {visibleElections.map(el => <option key={el.id} value={el.id}>{el.name} ({el.code})</option>)}
+                            </select>
+                        )}
                         <div className="grid grid-cols-2 gap-3">
                             <select
                                 value={selectedState}
@@ -407,6 +468,17 @@ const AgentManagement = () => {
                                 <div>
                                     <p className="text-xs font-black text-gray-900 dark:text-white">{agent.email}</p>
                                     <p className="text-[9px] text-gray-400 font-bold uppercase">{agent.status} • {agent.device}</p>
+                                    {(agent.client_name || (agent.assignments && agent.assignments.length > 0)) && (
+                                        <p className="text-[9px] text-brand/80 dark:text-brand font-bold uppercase tracking-widest mt-0.5">
+                                            {agent.client_name ? `🏛 ${agent.client_name}` : ''}
+                                            {agent.assignments && agent.assignments.length > 0 && (
+                                                <span className="text-gray-400 font-bold normal-case tracking-normal">
+                                                    {' · '}{agent.assignments.map(a =>
+                                                        `${a.election_code}${a.pu_code ? ' @ ' + a.pu_code : ''}`).join(', ')}
+                                                </span>
+                                            )}
+                                        </p>
+                                    )}
                                 </div>
                             </div>
                             <div className="flex space-x-1">

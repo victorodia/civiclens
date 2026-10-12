@@ -228,6 +228,7 @@ def _election_to_dict(e: Election, counts: dict) -> dict:
         "submitted": counts.get("submitted", 0),
         "pus": counts.get("pus", 0),
         "created_at": e.created_at.isoformat() if e.created_at else None,
+        "client_id": e.client_id,
         "client_name": counts.get("client_name"),
     }
 

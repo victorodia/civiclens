@@ -235,22 +235,43 @@ async def provision_new_agents(payload: ProvisionSchema, db: AsyncSession = Depe
 @router.get("/agents")
 async def get_all_agents(db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("view_agents"))):
     """
-    Returns a list of all provisioned field agents.
+    Returns a list of all provisioned field agents, each labeled with its
+    owning institution and its election assignment(s) so operators can tell
+    at a glance which tenant an agent works for.
     """
     from sqlalchemy import select
-    from .models import User
+    from .models import User, Client, Election, AgentAssignment, PollingUnit
     stmt = select(User).where(User.role == "agent")
     # Client tenancy: client admins see only their own institution's agents.
     if user.client_id is not None:
         stmt = stmt.where(User.client_id == user.client_id)
     result = await db.execute(stmt)
     agents = result.scalars().all()
-    
+
+    clients = {c.id: c.name for c in (await db.execute(select(Client))).scalars().all()}
+    assigns = {}
+    if agents:
+        rows = (await db.execute(
+            select(AgentAssignment.agent_id, Election.code, Election.name,
+                   PollingUnit.pu_code, PollingUnit.name)
+            .join(Election, AgentAssignment.election_id == Election.id)
+            .join(PollingUnit, AgentAssignment.pu_id == PollingUnit.id, isouter=True)
+            .where(AgentAssignment.agent_id.in_([a.id for a in agents]))
+        )).all()
+        for aid, code, ename, pu_code, pu_name in rows:
+            assigns.setdefault(aid, []).append({
+                "election_code": code, "election_name": ename,
+                "pu_code": pu_code, "pu_name": pu_name,
+            })
+
     return [
         {
             "id": str(agent.id),
             "email": agent.email,
             "full_name": agent.full_name,
+            "client_id": agent.client_id,
+            "client_name": clients.get(agent.client_id),
+            "assignments": assigns.get(agent.id, []),
             "status": "Pending Reset" if agent.requires_password_reset else "Active",
             "device": "Authorized" if agent.device_fingerprint else "Pending"
         }
