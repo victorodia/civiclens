@@ -14,9 +14,10 @@ import ResultsFeed from './components/ResultsFeed';
 import { NotificationProvider, useNotification } from './contexts/NotificationContext';
 import NotificationBanner from './components/NotificationBanner';
 import SecurityDialog from './components/SecurityDialog';
-import { LayoutDashboard, ShieldCheck, UserCircle, Users, Activity, Map, Settings, FileText, Vote } from 'lucide-react';
+import { LayoutDashboard, ShieldCheck, UserCircle, Users, Activity, Map, Settings, FileText, Vote, Building2 } from 'lucide-react';
 import { ElectionProvider, useElection } from './contexts/ElectionContext';
 import Elections from './components/Elections';
+import Clients from './components/Clients';
 
 // Election-scoped live map: reads the active election from context so the
 // switcher in the header drives what the map displays.
@@ -76,6 +77,10 @@ function ElectionSwitcher() {
 function LayoutShell({ children, activeView, setActiveView, onLogout, walletStatus, onRefreshWallet, hasPerm }) {
   const { isDarkMode, toggleTheme } = useTheme();
   const { showNotification } = useNotification();
+  // Institution management is platform-super-admin only (no client_id).
+  const isPlatformAdmin = (() => {
+    try { return !localStorage.getItem('adminClientId'); } catch (e) { return false; }
+  })();
 
   React.useEffect(() => {
     const handleOnline = () => showNotification('Connection restored. You are back online.', 'success');
@@ -221,6 +226,14 @@ function LayoutShell({ children, activeView, setActiveView, onLogout, walletStat
           >
             <Settings className="w-5 h-5 mb-1" />
             <span className="text-[9px] font-black uppercase tracking-widest">Config</span>
+          </button> }
+
+          { isPlatformAdmin && <button
+            onClick={() => setActiveView('clients')}
+            className={`flex flex-col items-center justify-center w-full h-full transition-colors ${activeView === 'clients' ? 'text-brand' : 'text-gray-400'}`}
+          >
+            <Building2 className="w-5 h-5 mb-1" />
+            <span className="text-[9px] font-black uppercase tracking-widest">Clients</span>
           </button> }
         </div>
       </nav>
@@ -401,6 +414,8 @@ function App() {
         return <UserProfileScreen onLogout={handleLogout} />;
       case 'settings':
         return <ElectionConfig />;
+      case 'clients':
+        return <Clients />;
       default:
         return <AdminDashboard setActiveView={setPersistedActiveView} />;
     }

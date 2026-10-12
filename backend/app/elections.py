@@ -119,6 +119,72 @@ async def create_client(
     return _client_to_dict(client, {})
 
 
+class ClientUpdateSchema(BaseModel):
+    name: Optional[str] = None
+    contact_email: Optional[str] = None
+    notes: Optional[str] = None
+
+
+@router.patch("/clients/{client_id}")
+async def update_client(
+    client_id: str,
+    payload: ClientUpdateSchema,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(RequirePermission("provision_agents")),
+):
+    """Platform-admin only: rename or update a client's contact details."""
+    if user.client_id is not None:
+        raise HTTPException(status_code=403, detail="Only platform administrators may edit clients.")
+    client = (await db.execute(select(Client).where(Client.id == client_id))).scalar_one_or_none()
+    if not client:
+        raise HTTPException(404, "Client not found.")
+    if payload.name is not None:
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(422, "Name must not be empty.")
+        clash = (await db.execute(select(Client).where(Client.name == name, Client.id != client.id))).scalar_one_or_none()
+        if clash:
+            raise HTTPException(409, f"A client named {name!r} already exists.")
+        client.name = name
+    if payload.contact_email is not None:
+        client.contact_email = payload.contact_email or None
+    if payload.notes is not None:
+        client.notes = payload.notes or None
+    await log_audit(db, actor_id=str(user.id), action="CLIENT_UPDATE",
+                    target_id=client.id, details=f"Updated client {client.name!r}")
+    await db.commit()
+    await db.refresh(client)
+    return _client_to_dict(client, {})
+
+
+@router.delete("/clients/{client_id}")
+async def delete_client(
+    client_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(RequirePermission("provision_agents")),
+):
+    """Platform-admin only. Refuses while elections or accounts reference
+    the client, so history can never be orphaned."""
+    if user.client_id is not None:
+        raise HTTPException(status_code=403, detail="Only platform administrators may delete clients.")
+    client = (await db.execute(select(Client).where(Client.id == client_id))).scalar_one_or_none()
+    if not client:
+        raise HTTPException(404, "Client not found.")
+    e_n = (await db.execute(select(func.count()).select_from(Election)
+                           .where(Election.client_id == client.id))).scalar_one()
+    u_n = (await db.execute(select(func.count()).select_from(User)
+                           .where(User.client_id == client.id))).scalar_one()
+    if e_n or u_n:
+        raise HTTPException(409,
+                            f"Client still has {e_n} election(s) and {u_n} account(s) — "
+                            "remove or reassign them first.")
+    await log_audit(db, actor_id=str(user.id), action="CLIENT_DELETE",
+                    target_id=client.id, details=f"Deleted client {client.name!r}")
+    await db.delete(client)
+    await db.commit()
+    return {"status": "deleted", "id": client_id}
+
+
 class ElectionCreateSchema(BaseModel):
     name: str
     code: str
