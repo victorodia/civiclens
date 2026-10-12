@@ -79,7 +79,12 @@ h = subprocess.run(
     capture_output=True, text=True, check=True).stdout.strip()
 sql(f"INSERT INTO users (id,email,hashed_password,full_name,role,is_active,requires_password_reset) "
     f"VALUES ('cl-temp-admin-0000-0000-000000000001','{ADMIN_EMAIL}','{h}','Temp Admin','admin',true,false) "
-    f"ON CONFLICT (email) DO NOTHING;")
+    # Upsert on the FIXED id: an earlier crashed run may have left this row
+    # behind under a different (random) email — reusing it with fresh
+    # credentials keeps nightly runs idempotent instead of dying on a PK
+    # conflict before a single check executes.
+    f"ON CONFLICT (id) DO UPDATE SET email=EXCLUDED.email, hashed_password=EXCLUDED.hashed_password, "
+    f"is_active=true, requires_password_reset=false;")
 
 try:
     st, r = call("POST", "/auth/login", {"email": ADMIN_EMAIL, "password": ADMIN_PW})
@@ -258,5 +263,14 @@ try:
     if failed:
         print("FAILED:", ", ".join(failed))
 finally:
-    sql(f"DELETE FROM users WHERE email IN ('{ADMIN_EMAIL}','{AGENT_EMAIL}');")
+    # Delete dependent rows first: results, pings, check-ins, assignments and
+    # audit entries all reference the temp users, and a plain DELETE FROM
+    # users fails on those FKs — which is exactly how previous runs left the
+    # fixed-id temp admin behind to break the next run's setup.
+    sql(f"DELETE FROM results WHERE agent_id IN (SELECT id FROM users WHERE email IN ('{ADMIN_EMAIL}','{AGENT_EMAIL}')); "
+        f"DELETE FROM agent_location_pings WHERE agent_id IN (SELECT id FROM users WHERE email IN ('{ADMIN_EMAIL}','{AGENT_EMAIL}')); "
+        f"DELETE FROM agent_checkins WHERE agent_id IN (SELECT id FROM users WHERE email IN ('{ADMIN_EMAIL}','{AGENT_EMAIL}')); "
+        f"DELETE FROM agent_assignments WHERE agent_id IN (SELECT id FROM users WHERE email IN ('{ADMIN_EMAIL}','{AGENT_EMAIL}')); "
+        f"DELETE FROM audit_logs WHERE actor_id IN (SELECT id FROM users WHERE email IN ('{ADMIN_EMAIL}','{AGENT_EMAIL}')); "
+        f"DELETE FROM users WHERE email IN ('{ADMIN_EMAIL}','{AGENT_EMAIL}');")
     print("cleanup: temp accounts removed")
