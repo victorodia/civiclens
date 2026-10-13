@@ -36,8 +36,10 @@ const AgentManagement = () => {
 
     useEffect(() => {
         fetchAgents();
-        fetchStates();
         fetchTenancyOptions();
+        // Geo cascade loads only after an election is picked — every agent
+        // is accredited for a specific race now, so the location options
+        // are always that race's scope.
     }, []);
 
     // Institution + election pickers for provisioning. Platform super-admins
@@ -161,6 +163,7 @@ const AgentManagement = () => {
 
     const handleProvision = async (e) => {
         e.preventDefault();
+        if (!selectedElection) return showNotification("Pick the election this agent is accredited for first.", "warning");
         if (!selectedPu) return showNotification("Please select a Polling Unit first.", "warning");
         if (isPlatformAdmin && !selectedClient) return showNotification("Pick the institution this agent belongs to.", "warning");
         setIsProvisioning(true);
@@ -388,7 +391,7 @@ const AgentManagement = () => {
                                 onChange={(e) => handleElectionChange(e.target.value)}
                                 className="w-full px-4 py-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-950 text-[10px] font-black uppercase outline-none focus:ring-2 focus:ring-brand"
                             >
-                                <option value="">Accredit for election (optional)</option>
+                                <option value="">Select election to accredit for</option>
                                 {visibleElections.map(el => <option key={el.id} value={el.id}>{el.name} ({el.code})</option>)}
                             </select>
                         )}
@@ -396,9 +399,10 @@ const AgentManagement = () => {
                             <select
                                 value={selectedState}
                                 onChange={(e) => handleStateChange(e.target.value)}
-                                className="px-4 py-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-950 text-[10px] font-black uppercase outline-none focus:ring-2 focus:ring-brand"
+                                disabled={!selectedElection}
+                                className="px-4 py-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-950 text-[10px] font-black uppercase outline-none focus:ring-2 focus:ring-brand disabled:opacity-50"
                             >
-                                <option value="">Select State</option>
+                                <option value="">{selectedElection ? 'Select State' : 'Pick an election first'}</option>
                                 {states.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                             </select>
 
