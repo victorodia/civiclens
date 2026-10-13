@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from .db import get_db
 from .verification import mock_ocr_analysis, verify_result_integrity
 
-from .models import User, Role, CustomRole, State, LGA, Ward, PollingUnit, Result, ElectionConfig, AuditLog, AgentLocationPing
+from .models import User, Role, CustomRole, State, LGA, Ward, PollingUnit, Result, ElectionConfig, AuditLog, AgentLocationPing, Election, ElectionPU
 from .security import get_current_user, RequirePermission, log_audit, verify_password, get_password_hash
 
 
@@ -314,35 +314,77 @@ async def rotate_agent_signing_key(payload: RotateKeySchema, db: AsyncSession = 
         "message": "Previous key is now invalid. Distribute the new key to the agent."
     }
 
+async def _assert_election_geo_visible(db: AsyncSession, user: User, election_id: str):
+    """404 (not 403 — don't reveal existence) when the election is missing
+    or outside the caller's client tenancy."""
+    election = (await db.execute(
+        select(Election).where(Election.id == election_id))).scalar_one_or_none()
+    if not election:
+        raise HTTPException(status_code=404, detail="Election not found.")
+    from .elections import client_scope_election_ids
+    scoped = await client_scope_election_ids(db, user)
+    if scoped is not None and election_id not in scoped:
+        raise HTTPException(status_code=404, detail="Election not found.")
+
+
+def _scoped_geo_subqueries(election_id: str):
+    """Geo-level id sets covered by an election's materialized PU scope:
+    returns (state_ids, lga_ids, ward_ids, pu_ids) subqueries."""
+    pu_ids = select(ElectionPU.pu_id).where(ElectionPU.election_id == election_id)
+    ward_ids = select(PollingUnit.ward_id).where(PollingUnit.id.in_(pu_ids))
+    lga_ids = select(Ward.lga_id).where(Ward.id.in_(ward_ids))
+    state_ids = select(LGA.state_id).where(LGA.id.in_(lga_ids))
+    return state_ids, lga_ids, ward_ids, pu_ids
+
 @router.get("/geo/states")
-async def get_states(db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("view_geographic_data"))):
+async def get_states(election_id: Optional[str] = None, db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("view_geographic_data"))):
     from sqlalchemy import select
     from .models import State
-    res = await db.execute(select(State).order_by(State.name))
+    q = select(State)
+    if election_id:
+        await _assert_election_geo_visible(db, user, election_id)
+        state_ids, _, _, _ = _scoped_geo_subqueries(election_id)
+        q = q.where(State.id.in_(state_ids))
+    res = await db.execute(q.order_by(State.name))
     states = res.scalars().all()
     return [{"id": str(s.id), "name": s.name} for s in states]
 
 @router.get("/geo/states/{state_id}/lgas")
-async def get_lgas(state_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("view_geographic_data"))):
+async def get_lgas(state_id: str, election_id: Optional[str] = None, db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("view_geographic_data"))):
     from sqlalchemy import select
     from .models import LGA
-    res = await db.execute(select(LGA).where(LGA.state_id == state_id).order_by(LGA.name))
+    q = select(LGA).where(LGA.state_id == state_id)
+    if election_id:
+        await _assert_election_geo_visible(db, user, election_id)
+        _, lga_ids, _, _ = _scoped_geo_subqueries(election_id)
+        q = q.where(LGA.id.in_(lga_ids))
+    res = await db.execute(q.order_by(LGA.name))
     lgas = res.scalars().all()
     return [{"id": str(l.id), "name": l.name} for l in lgas]
 
 @router.get("/geo/lgas/{lga_id}/wards")
-async def get_wards(lga_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("view_geographic_data"))):
+async def get_wards(lga_id: str, election_id: Optional[str] = None, db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("view_geographic_data"))):
     from sqlalchemy import select
     from .models import Ward
-    res = await db.execute(select(Ward).where(Ward.lga_id == lga_id).order_by(Ward.name))
+    q = select(Ward).where(Ward.lga_id == lga_id)
+    if election_id:
+        await _assert_election_geo_visible(db, user, election_id)
+        _, _, ward_ids, _ = _scoped_geo_subqueries(election_id)
+        q = q.where(Ward.id.in_(ward_ids))
+    res = await db.execute(q.order_by(Ward.name))
     wards = res.scalars().all()
     return [{"id": str(w.id), "name": w.name} for w in wards]
 
 @router.get("/geo/wards/{ward_id}/pus")
-async def get_pus(ward_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("view_geographic_data"))):
+async def get_pus(ward_id: str, election_id: Optional[str] = None, db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("view_geographic_data"))):
     from sqlalchemy import select
     from .models import PollingUnit
-    res = await db.execute(select(PollingUnit).where(PollingUnit.ward_id == ward_id).order_by(PollingUnit.name))
+    q = select(PollingUnit).where(PollingUnit.ward_id == ward_id)
+    if election_id:
+        await _assert_election_geo_visible(db, user, election_id)
+        _, _, _, pu_ids = _scoped_geo_subqueries(election_id)
+        q = q.where(PollingUnit.id.in_(pu_ids))
+    res = await db.execute(q.order_by(PollingUnit.name))
     pus = res.scalars().all()
     return [{"id": str(p.id), "name": p.name, "code": p.pu_code} for p in pus]
 

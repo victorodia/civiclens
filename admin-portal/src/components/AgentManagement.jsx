@@ -77,9 +77,15 @@ const AgentManagement = () => {
         setSelectedElection('');
     };
 
-    const fetchStates = async () => {
+    // When an election is chosen for accreditation, the geo cascade only
+    // shows what is inside that election's scope — the backend filters each
+    // level through election_polling_units. Empty election = full country.
+    const geoQuery = (electionId = selectedElection) =>
+        electionId ? `?election_id=${electionId}` : '';
+
+    const fetchStates = async (electionId = selectedElection) => {
         try {
-            const res = await fetch('/admin/geo/states');
+            const res = await fetch(`/admin/geo/states${geoQuery(electionId)}`);
             if (res.ok) {
                 const data = await res.json();
                 setStates(Array.isArray(data) ? data : []);
@@ -90,13 +96,21 @@ const AgentManagement = () => {
         }
     };
 
+    // Changing the election restarts the whole cascade under the new scope.
+    const handleElectionChange = (electionId) => {
+        setSelectedElection(electionId);
+        setSelectedState(''); setSelectedLga(''); setSelectedWard(''); setSelectedPu('');
+        setLgas([]); setWards([]); setPus([]);
+        fetchStates(electionId);
+    };
+
     const handleStateChange = async (stateId) => {
         setSelectedState(stateId);
         setSelectedLga(''); setSelectedWard(''); setSelectedPu('');
         setLgas([]); setWards([]); setPus([]);
         if (!stateId) return;
         try {
-            const res = await fetch(`/admin/geo/states/${stateId}/lgas`);
+            const res = await fetch(`/admin/geo/states/${stateId}/lgas${geoQuery()}`);
             if (res.ok) {
                 const data = await res.json();
                 setLgas(Array.isArray(data) ? data : []);
@@ -110,7 +124,7 @@ const AgentManagement = () => {
         setWards([]); setPus([]);
         if (!lgaId) return;
         try {
-            const res = await fetch(`/admin/geo/lgas/${lgaId}/wards`);
+            const res = await fetch(`/admin/geo/lgas/${lgaId}/wards${geoQuery()}`);
             if (res.ok) {
                 const data = await res.json();
                 setWards(Array.isArray(data) ? data : []);
@@ -123,7 +137,7 @@ const AgentManagement = () => {
         setSelectedPu(''); setPus([]);
         if (!wardId) return;
         try {
-            const res = await fetch(`/admin/geo/wards/${wardId}/pus`);
+            const res = await fetch(`/admin/geo/wards/${wardId}/pus${geoQuery()}`);
             if (res.ok) {
                 const data = await res.json();
                 setPus(Array.isArray(data) ? data : []);
@@ -371,7 +385,7 @@ const AgentManagement = () => {
                         {visibleElections.length > 0 && (
                             <select
                                 value={selectedElection}
-                                onChange={(e) => setSelectedElection(e.target.value)}
+                                onChange={(e) => handleElectionChange(e.target.value)}
                                 className="w-full px-4 py-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-950 text-[10px] font-black uppercase outline-none focus:ring-2 focus:ring-brand"
                             >
                                 <option value="">Accredit for election (optional)</option>
