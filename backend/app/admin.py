@@ -658,31 +658,59 @@ async def get_workforce_monitor(
     lga_id: Optional[str] = None,
     ward_id: Optional[str] = None,
     pu_id: Optional[str] = None,
+    client_id: Optional[str] = None,
+    election_id: Optional[str] = None,
     on_site: Optional[bool] = None,
     result_uploaded: Optional[bool] = None,
     db: AsyncSession = Depends(get_db), user = Depends(RequirePermission("view_agents"))
 ):
     """
     Advanced Workforce Monitoring: Correlates agent presence with geographic binding and results.
+
+    Filter hierarchy: client -> election -> state -> lga -> ward -> pu.
+    When an election is given, agents are resolved through their
+    accreditation (agent_assignments) for that race and a result only
+    counts when it belongs to the SAME election — one agent's senatorial
+    upload never satisfies the governorship view.
     """
     from sqlalchemy import select, func
-    from .models import User, PollingUnit, Ward, LGA, State, Result
+    from .models import User, PollingUnit, Ward, LGA, State, Result, AgentAssignment
 
-    stmt = select(User, PollingUnit, Ward, LGA, State, Result).join(
-        PollingUnit, User.assigned_pu_id == PollingUnit.id, isouter=True
-    ).join(
-        Ward, PollingUnit.ward_id == Ward.id, isouter=True
-    ).join(
-        LGA, Ward.lga_id == LGA.id, isouter=True
-    ).join(
-        State, LGA.state_id == State.id, isouter=True
-    ).join(
-        Result, PollingUnit.id == Result.pu_id, isouter=True
-    ).where(User.role == "agent")
+    if election_id:
+        await _assert_election_geo_visible(db, user, election_id)
+        asg = select(AgentAssignment.agent_id, AgentAssignment.pu_id).where(
+            AgentAssignment.election_id == election_id).subquery()
+        stmt = select(User, PollingUnit, Ward, LGA, State, Result).join(
+            asg, asg.c.agent_id == User.id
+        ).join(
+            PollingUnit, PollingUnit.id == asg.c.pu_id, isouter=True
+        ).join(
+            Ward, PollingUnit.ward_id == Ward.id, isouter=True
+        ).join(
+            LGA, Ward.lga_id == LGA.id, isouter=True
+        ).join(
+            State, LGA.state_id == State.id, isouter=True
+        ).join(
+            Result, (Result.pu_id == PollingUnit.id) & (Result.election_id == election_id), isouter=True
+        ).where(User.role == "agent")
+    else:
+        stmt = select(User, PollingUnit, Ward, LGA, State, Result).join(
+            PollingUnit, User.assigned_pu_id == PollingUnit.id, isouter=True
+        ).join(
+            Ward, PollingUnit.ward_id == Ward.id, isouter=True
+        ).join(
+            LGA, Ward.lga_id == LGA.id, isouter=True
+        ).join(
+            State, LGA.state_id == State.id, isouter=True
+        ).join(
+            Result, PollingUnit.id == Result.pu_id, isouter=True
+        ).where(User.role == "agent")
 
-    # Client tenancy: client admins monitor only their own institution's agents.
-    if user.client_id is not None:
-        stmt = stmt.where(User.client_id == user.client_id)
+    # Client tenancy: client admins monitor only their own institution's
+    # agents; platform staff may narrow by any client.
+    effective_client_id = user.client_id if user.client_id is not None else client_id
+    if effective_client_id:
+        stmt = stmt.where(User.client_id == effective_client_id)
 
     # Apply Filters
     if state_id: stmt = stmt.where(State.id == state_id)

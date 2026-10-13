@@ -8,6 +8,16 @@ const WorkforceMonitor = ({ setActiveView }) => {
     const [isRefreshing, setIsRefreshing] = useState(false);
     const [viewingImage, setViewingImage] = useState(null);
 
+    // Filter hierarchy: Client -> Election -> State -> LGA -> Ward -> PU.
+    // The geo dropdowns only ever show what is inside the selected
+    // election's scope (server-side filtered via ?election_id=).
+    const isPlatformAdmin = (() => {
+        try { return !localStorage.getItem('adminClientId'); } catch (e) { return false; }
+    })();
+
+    const [clients, setClients] = useState([]);
+    const [elections, setElections] = useState([]);
+
     // Geographic State for Filters
     const [states, setStates] = useState([]);
     const [lgas, setLgas] = useState([]);
@@ -15,6 +25,8 @@ const WorkforceMonitor = ({ setActiveView }) => {
     const [pus, setPus] = useState([]);
 
     const [filters, setFilters] = useState({
+        client_id: '',
+        election_id: '',
         state_id: '',
         lga_id: '',
         ward_id: '',
@@ -25,13 +37,32 @@ const WorkforceMonitor = ({ setActiveView }) => {
     const [securityAudit, setSecurityAudit] = useState(false);
 
     useEffect(() => {
-        fetchStates();
         fetchWorkforce();
+        fetchTenancyOptions();
     }, []);
 
-    const fetchStates = async () => {
+    const fetchTenancyOptions = async () => {
         try {
-            const res = await fetch('/admin/geo/states');
+            const [cRes, eRes] = await Promise.all([
+                isPlatformAdmin ? fetch('/admin/clients') : Promise.resolve(null),
+                fetch('/admin/elections'),
+            ]);
+            if (cRes && cRes.ok) setClients((await cRes.json()).clients || []);
+            if (eRes.ok) setElections((await eRes.json()).elections || []);
+        } catch (e) { console.error(e); }
+    };
+
+    const visibleElections = isPlatformAdmin && filters.client_id
+        ? elections.filter(e => e.client_id === filters.client_id)
+        : elections;
+
+    const geoQuery = (electionId = filters.election_id) =>
+        electionId ? `?election_id=${electionId}` : '';
+
+    const fetchStates = async (electionId = filters.election_id) => {
+        if (!electionId) { setStates([]); return; }
+        try {
+            const res = await fetch(`/admin/geo/states${geoQuery(electionId)}`);
             if (res.ok) setStates(await res.json());
         } catch (e) { console.error(e); }
     };
@@ -40,6 +71,8 @@ const WorkforceMonitor = ({ setActiveView }) => {
         setIsRefreshing(true);
         try {
             const queryParams = new URLSearchParams();
+            if (filters.client_id) queryParams.append('client_id', filters.client_id);
+            if (filters.election_id) queryParams.append('election_id', filters.election_id);
             if (filters.state_id) queryParams.append('state_id', filters.state_id);
             if (filters.lga_id) queryParams.append('lga_id', filters.lga_id);
             if (filters.ward_id) queryParams.append('ward_id', filters.ward_id);
@@ -63,12 +96,23 @@ const WorkforceMonitor = ({ setActiveView }) => {
     const handleFilterChange = (key, value) => {
         setFilters(prev => {
             const next = { ...prev, [key]: value };
+            if (key === 'client_id') return { ...next, election_id: '', state_id: '', lga_id: '', ward_id: '', pu_id: '' };
+            if (key === 'election_id') return { ...next, state_id: '', lga_id: '', ward_id: '', pu_id: '' };
             if (key === 'state_id') return { ...next, lga_id: '', ward_id: '', pu_id: '' };
             if (key === 'lga_id') return { ...next, ward_id: '', pu_id: '' };
             if (key === 'ward_id') return { ...next, pu_id: '' };
             return next;
         });
 
+        if (key === 'client_id') {
+            // Election/geo options re-derive from state on next render;
+            // nothing to fetch until an election is picked again.
+            setStates([]); setLgas([]); setWards([]); setPus([]);
+        }
+        if (key === 'election_id') {
+            setLgas([]); setWards([]); setPus([]);
+            fetchStates(value);
+        }
         if (key === 'state_id') {
             if (value) fetchLgas(value); else setLgas([]);
             setWards([]); setPus([]);
@@ -85,7 +129,7 @@ const WorkforceMonitor = ({ setActiveView }) => {
     const fetchLgas = async (stateId) => {
         if (!stateId) { setLgas([]); return; }
         try {
-            const res = await fetch(`/admin/geo/states/${stateId}/lgas`);
+            const res = await fetch(`/admin/geo/states/${stateId}/lgas${geoQuery()}`);
             if (res.ok) setLgas(await res.json());
         } catch (e) { console.error(e); }
     };
@@ -93,7 +137,7 @@ const WorkforceMonitor = ({ setActiveView }) => {
     const fetchWards = async (lgaId) => {
         if (!lgaId) { setWards([]); return; }
         try {
-            const res = await fetch(`/admin/geo/lgas/${lgaId}/wards`);
+            const res = await fetch(`/admin/geo/lgas/${lgaId}/wards${geoQuery()}`);
             if (res.ok) setWards(await res.json());
         } catch (e) { console.error(e); }
     };
@@ -101,14 +145,14 @@ const WorkforceMonitor = ({ setActiveView }) => {
     const fetchPus = async (wardId) => {
         if (!wardId) { setPus([]); return; }
         try {
-            const res = await fetch(`/admin/geo/wards/${wardId}/pus`);
+            const res = await fetch(`/admin/geo/wards/${wardId}/pus${geoQuery()}`);
             if (res.ok) setPus(await res.json());
         } catch (e) { console.error(e); }
     };
 
     useEffect(() => {
         fetchWorkforce();
-    }, [filters.on_site, filters.result_uploaded, filters.pu_id, filters.ward_id, filters.lga_id, filters.state_id]);
+    }, [filters.client_id, filters.election_id, filters.on_site, filters.result_uploaded, filters.pu_id, filters.ward_id, filters.lga_id, filters.state_id]);
 
     return (
         <div className="space-y-6 animate-in fade-in duration-500">
@@ -171,8 +215,8 @@ const WorkforceMonitor = ({ setActiveView }) => {
                         </button>
                         <button
                             onClick={() => {
-                                setFilters({ state_id: '', lga_id: '', ward_id: '', pu_id: '', on_site: '', result_uploaded: '' });
-                                setLgas([]); setWards([]); setPus([]);
+                                setFilters({ client_id: '', election_id: '', state_id: '', lga_id: '', ward_id: '', pu_id: '', on_site: '', result_uploaded: '' });
+                                setStates([]); setLgas([]); setWards([]); setPus([]);
                                 fetchWorkforce();
                             }}
                             className="p-2 text-gray-400 hover:text-brand transition-colors"
@@ -183,15 +227,42 @@ const WorkforceMonitor = ({ setActiveView }) => {
                     </div>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                    {isPlatformAdmin && (
+                        <div className="space-y-1.5">
+                            <label className="text-[9px] font-black text-gray-400 uppercase tracking-widest ml-1">Client</label>
+                            <select
+                                value={filters.client_id}
+                                onChange={(e) => handleFilterChange('client_id', e.target.value)}
+                                className="w-full px-4 py-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-950 text-[9px] font-bold uppercase outline-none focus:ring-2 focus:ring-brand"
+                            >
+                                <option value="">All Clients</option>
+                                {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                            </select>
+                        </div>
+                    )}
+
+                    <div className="space-y-1.5">
+                        <label className="text-[9px] font-black text-gray-400 uppercase tracking-widest ml-1">Election</label>
+                        <select
+                            value={filters.election_id}
+                            onChange={(e) => handleFilterChange('election_id', e.target.value)}
+                            className="w-full px-4 py-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-950 text-[9px] font-bold uppercase outline-none focus:ring-2 focus:ring-brand"
+                        >
+                            <option value="">All Elections</option>
+                            {visibleElections.map(el => <option key={el.id} value={el.id}>{el.name} ({el.code})</option>)}
+                        </select>
+                    </div>
+
                     <div className="space-y-1.5">
                         <label className="text-[9px] font-black text-gray-400 uppercase tracking-widest ml-1">State</label>
                         <select
                             value={filters.state_id}
                             onChange={(e) => handleFilterChange('state_id', e.target.value)}
-                            className="w-full px-4 py-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-950 text-[9px] font-bold uppercase outline-none focus:ring-2 focus:ring-brand"
+                            disabled={!filters.election_id}
+                            className="w-full px-4 py-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-950 text-[9px] font-bold uppercase outline-none focus:ring-2 focus:ring-brand disabled:opacity-50"
                         >
-                            <option value="">All States</option>
+                            <option value="">{filters.election_id ? 'All States' : 'Pick an election first'}</option>
                             {states.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                         </select>
                     </div>
@@ -279,7 +350,7 @@ const WorkforceMonitor = ({ setActiveView }) => {
                         </thead>
                         <tbody className="divide-y divide-gray-50 dark:divide-gray-800">
                             {workforce.map((agent) => (
-                                <tr key={agent.agent_id} className="hover:bg-gray-50/50 dark:hover:bg-gray-800/20 transition-colors group">
+                                <tr key={`${agent.agent_id}-${agent.pu_code}`} className="hover:bg-gray-50/50 dark:hover:bg-gray-800/20 transition-colors group">
                                     <td className="p-5">
                                         <div className="flex items-center space-x-3">
                                             <div className="w-8 h-8 bg-gray-100 dark:bg-gray-800 rounded-lg flex items-center justify-center text-gray-400 group-hover:text-brand transition-colors">
