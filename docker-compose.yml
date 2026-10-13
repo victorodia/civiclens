@@ -33,6 +33,10 @@ services:
       - POLYGON_RPC_URL=${POLYGON_RPC_URL:?set POLYGON_RPC_URL in .env}
       - POLYGON_PRIVATE_KEY=${POLYGON_PRIVATE_KEY:?set POLYGON_PRIVATE_KEY in .env}
       - GEOFENCE_RADIUS_METRES=${GEOFENCE_RADIUS_METRES:-400}
+    volumes:
+      # Evidence uploads must survive container rebuilds — the food-truck
+      # problem: files stored inside the container vanish on every deploy.
+      - /home/ubuntu/civiclens-data/uploads:/app/app/static/uploads
     depends_on:
       - db
       - redis
