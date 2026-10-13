@@ -67,6 +67,32 @@ function ScopeEditor({ election, onDone }) {
         (lgasByState[st.id] || []).length > 0 && lgasByState[st.id].every(l => checkedLgas[l.id])
     ).map(st => st.name);
 
+    const [selectingAll, setSelectingAll] = useState(false);
+    const selectAllLgas = async () => {
+        setSelectingAll(true);
+        try {
+            // LGAs load lazily per opened state — pull any missing lists in
+            // parallel so every LGA in the country can be ticked at once.
+            const merged = { ...lgasByState };
+            await Promise.all(states.map(async st => {
+                if (merged[st.id]) return;
+                try {
+                    const res = await fetch(`/admin/geo/states/${st.id}/lgas`);
+                    if (!res.ok) return;
+                    const data = await res.json();
+                    merged[st.id] = data.lgas || data || [];
+                } catch (e) {}
+            }));
+            setLgasByState(merged);
+            const next = {};
+            Object.values(merged).flat().forEach(l => { next[l.id] = true; });
+            setCheckedLgas(next);
+        } finally {
+            setSelectingAll(false);
+        }
+    };
+    const clearAllLgas = () => setCheckedLgas({});
+
     const save = async () => {
         const lga_ids = Object.entries(checkedLgas).filter(([, v]) => v).map(([k]) => k);
         if (!lga_ids.length) {
@@ -103,9 +129,21 @@ function ScopeEditor({ election, onDone }) {
     return (
         <div className="mt-3 border border-gray-200 dark:border-gray-700 rounded-xl p-3 bg-gray-50 dark:bg-gray-900/40">
             <div className="flex items-center justify-between mb-2">
-                <p className="text-[10px] font-black uppercase tracking-widest text-gray-500">
-                    Election scope — {allChecked()} LGAs selected
-                </p>
+                <div className="flex items-center space-x-3">
+                    <p className="text-[10px] font-black uppercase tracking-widest text-gray-500">
+                        Election scope — {allChecked()} LGAs selected
+                    </p>
+                    {!saving && (
+                        <span className="flex space-x-2">
+                            <button onClick={selectAllLgas} disabled={selectingAll}
+                                className="text-[10px] text-brand font-bold disabled:opacity-50">
+                                {selectingAll ? 'Loading…' : 'Select all'}
+                            </button>
+                            <button onClick={clearAllLgas}
+                                className="text-[10px] text-gray-400 font-bold">Clear</button>
+                        </span>
+                    )}
+                </div>
                 <button onClick={save} disabled={saving}
                     className="flex items-center space-x-1 bg-brand text-white px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest disabled:opacity-50">
                     <Save className="w-3 h-3" /><span>{saving ? 'Saving…' : 'Save scope'}</span>
@@ -341,7 +379,7 @@ const Elections = ({ setActiveView }) => {
                         </button>
                     </div>
 
-                    {scopeFor === e.id && <ScopeEditor election={e} onDone={refresh} />}
+                    {scopeFor === e.id && <ScopeEditor election={e} onDone={() => { refresh(); setScopeFor(null); }} />}
                 </div>
             ))}
         </motion.div>
