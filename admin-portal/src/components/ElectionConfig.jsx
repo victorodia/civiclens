@@ -6,7 +6,7 @@ import SystemUsers from './SystemUsers';
 import RoleManagement from './RoleManagement';
 
 const ElectionConfig = () => {
-    const { showNotification } = useNotification();
+    const { showNotification, showDialog } = useNotification();
     const [config, setConfig] = useState({
         party_a_name: '',
         party_b_name: '',
