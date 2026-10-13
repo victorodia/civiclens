@@ -400,12 +400,14 @@ async def revoke_agent(agent_id: str, payload: RevokeSchema, db: AsyncSession = 
 @router.post("/factory-reset")
 async def factory_reset_system(payload: RevokeSchema, db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("trigger_factory_reset"))):
     """
-    NUCLEAR OPTION: Purges all results and field agent accounts.
+    NUCLEAR OPTION: wipes the entire operational database — every election,
+    institution, agent account, result, check-in, GPS ping and evidence file.
+    Surviving the wipe: geographic data (states/LGAs/wards/polling units),
+    platform administrator accounts (client_id NULL), roles, and the audit
+    log (accountability trail must outlive the data it describes).
     Requires administrative re-authentication.
     """
-    from .security import verify_password, get_current_user, RequirePermission
-    from .models import User, Result
-    from sqlalchemy import delete
+    from .security import verify_password
 
     # 1. Verify Administrative Re-authentication against the authenticated caller.
     if not verify_password(payload.admin_password, user.hashed_password):
@@ -415,17 +417,16 @@ async def factory_reset_system(payload: RevokeSchema, db: AsyncSession = Depends
         )
 
     # 2. Sequential Purgation (Nuclear Option) — strict child-before-parent
-    #    order: every table holding an FK into results/users must be purged
-    #    first, otherwise the deletes abort on constraint violations (this
-    #    was the original bug: deleting agents while checkins/pings/
-    #    assignments still referenced them -> 500 on every reset).
+    #    order: every table holding an FK into results/users/elections must
+    #    be purged first, otherwise the deletes abort on constraint
+    #    violations.
 
     # Audit before destruction
     await log_audit(
         db,
         actor_id=str(user.id),
         action="FACTORY_RESET",
-        details="Nuclear purgation of all results and agent accounts initiated."
+        details="Full system wipe: elections, clients, agents, results, sessions and evidence."
     )
 
     # Force purge of results first
@@ -445,15 +446,26 @@ async def factory_reset_system(payload: RevokeSchema, db: AsyncSession = Depends
             except OSError:
                 pass
 
-    # Purge all agents (keeping only admins)
-    await db.execute(text("DELETE FROM users WHERE role = 'agent'"))
+    # Elections and their materialized scopes
+    await db.execute(text("DELETE FROM election_polling_units"))
+    await db.execute(text("DELETE FROM elections"))
+
+    # Field agents AND client-bound operator accounts (client admins), then
+    # the institutions themselves. Platform admins (client_id NULL) survive.
+    await db.execute(text("DELETE FROM users WHERE role = 'agent' OR client_id IS NOT NULL"))
+    await db.execute(text("DELETE FROM clients"))
+
+    # Legacy singleton config pointed at the wiped election — clear labels.
+    await db.execute(text(
+        "UPDATE election_config SET party_a_name = NULL, party_b_name = NULL, "
+        "party_c_name = NULL, election_name = NULL WHERE id = 'global'"))
 
     await db.commit()
     print("[SECURITY] Factory Reset Complete: System Purgated.")
 
     return {
         "status": "success",
-        "message": "System has been restored to factory state. All results, evidence files and agent profiles have been purged."
+        "message": "Full wipe complete. Elections, institutions, agents, results, sessions and evidence have been purged. Geo data, platform admins and the audit log remain."
     }
 
 @router.get("/workforce-status")

@@ -60,7 +60,7 @@ const ElectionConfig = () => {
     const handleFactoryReset = async () => {
         const password = await showDialog({
             title: "Nuclear System Reset",
-            message: "DANGER: This will purge ALL results and agent accounts. Enter Admin Security Key to confirm:"
+            message: "DANGER: This wipes EVERYTHING — all elections, institutions, agents, results, sessions and evidence. Only geo data and platform admin accounts survive. Enter Admin Security Key to confirm:"
         });
 
         if (!password) return;
@@ -74,7 +74,7 @@ const ElectionConfig = () => {
             });
             const data = await res.json();
             if (res.ok) {
-                showNotification('SYSTEM PURGED. All results and agents have been deleted.', 'success');
+                showNotification('SYSTEM WIPED. All elections, institutions, agents, results and evidence have been deleted.', 'success');
                 fetchConfig(); // Refresh state
             } else {
                 showNotification(data.detail || 'Reset failed.', 'error');
@@ -226,7 +226,7 @@ const ElectionConfig = () => {
                 <div className="bg-white/50 dark:bg-black/20 p-4 rounded-2xl border border-red-100 dark:border-red-900/40 mb-6">
                     <p className="text-xs text-red-800 dark:text-red-300 leading-relaxed">
                         <span className="font-black uppercase mr-1">Warning:</span>
-                        Initiating a **Factory Reset** will permanently delete all uploaded results, evidence photos/videos, and field agent profiles. This action is intended for use **only** between election cycles or when decommissioning a region.
+                        Initiating a **Factory Reset** permanently deletes <span className="font-black">every election, institution (client), field agent, uploaded result, evidence photo/video, and field session</span>. Only geographic data (states, LGAs, wards, polling units), platform administrator accounts, and the audit log survive. This action is intended for use **only** between election cycles or when starting completely fresh.
                     </p>
                 </div>
 
