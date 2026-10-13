@@ -755,24 +755,82 @@ async def get_unassigned_pus(
     state_id: Optional[str] = None,
     lga_id: Optional[str] = None,
     ward_id: Optional[str] = None,
+    client_id: Optional[str] = None,
+    election_id: Optional[str] = None,
     limit: int = 150,
     db: AsyncSession = Depends(get_db), user = Depends(RequirePermission("view_agents"))
 ):
     """
-    Electronic Coverage Audit: Identifies Polling Units without assigned field agents.
-    Optimized with LEFT JOIN and strict limiting for Situation Room performance.
+    Electronic Coverage Audit: polling units without an accredited agent.
+    With an election, gaps mean "in this election's scope but no agent
+    accredited FOR THAT election". Without one, the legacy whole-registry
+    view (platform admins only may omit the election).
     """
-    print(f"AUDIT REQUEST: state={state_id}, lga={lga_id}, ward={ward_id}")
+    print(f"AUDIT REQUEST: state={state_id}, lga={lga_id}, ward={ward_id}, election={election_id}")
     from sqlalchemy import select, func
-    from .models import PollingUnit, User, Ward, LGA, State
+    from .models import PollingUnit, User, Ward, LGA, State, ElectionPU, AgentAssignment
 
-    # Build the base query for gaps
-    # We join with User where User is assigned to the PU, and look for NULL matches
-    # Client tenancy: only agents of the caller's institution count as coverage.
-    coverage = User
+    if election_id:
+        await _assert_election_geo_visible(db, user, election_id)
+        # Scoped PUs lacking an assignment for this exact election.
+        base = select(PollingUnit, Ward, LGA, State).join(
+            ElectionPU, ElectionPU.pu_id == PollingUnit.id
+        ).join(
+            Ward, PollingUnit.ward_id == Ward.id
+        ).join(
+            LGA, Ward.lga_id == LGA.id
+        ).join(
+            State, LGA.state_id == State.id
+        ).outerjoin(
+            AgentAssignment,
+            (AgentAssignment.pu_id == PollingUnit.id)
+            & (AgentAssignment.election_id == ElectionPU.election_id)
+        ).where(
+            ElectionPU.election_id == election_id,
+            AgentAssignment.id.is_(None),
+        )
+        if state_id: base = base.where(State.id == state_id)
+        if lga_id: base = base.where(LGA.id == lga_id)
+        if ward_id: base = base.where(Ward.id == ward_id)
+
+        count_stmt = select(func.count(PollingUnit.id)).select_from(PollingUnit).join(
+            ElectionPU, ElectionPU.pu_id == PollingUnit.id
+        ).join(
+            Ward, PollingUnit.ward_id == Ward.id
+        ).join(
+            LGA, Ward.lga_id == LGA.id
+        ).join(
+            State, LGA.state_id == State.id
+        ).outerjoin(
+            AgentAssignment,
+            (AgentAssignment.pu_id == PollingUnit.id)
+            & (AgentAssignment.election_id == ElectionPU.election_id)
+        ).where(
+            ElectionPU.election_id == election_id,
+            AgentAssignment.id.is_(None),
+        )
+        if state_id: count_stmt = count_stmt.where(State.id == state_id)
+        if lga_id: count_stmt = count_stmt.where(LGA.id == lga_id)
+        if ward_id: count_stmt = count_stmt.where(Ward.id == ward_id)
+
+        total_count = (await db.execute(count_stmt)).scalar()
+        stmt = base.limit(limit)
+        res = await db.execute(stmt)
+        gaps = [{
+            "id": pu.id, "name": pu.name, "code": pu.pu_code,
+            "ward": ward.name, "lga": lga.name, "state": state.name,
+        } for pu, ward, lga, state in res.all()]
+        return {"total_count": total_count, "returned_count": len(gaps), "gaps": gaps}
+
+    # ── Legacy whole-registry view ──
+    # Client tenancy: only agents of the caller's institution count as
+    # coverage; platform staff may narrow coverage to one client.
+    from sqlalchemy import and_ as _and
+    effective_client_id = user.client_id if user.client_id is not None else client_id
     coverage_filters = [PollingUnit.id == User.assigned_pu_id]
-    if user.client_id is not None:
-        coverage_filters.append(User.client_id == user.client_id)
+    if effective_client_id:
+        coverage_filters.append(User.client_id == effective_client_id)
+    coverage_onclause = _and(*coverage_filters)
     stmt = select(PollingUnit, Ward, LGA, State).join(
         Ward, PollingUnit.ward_id == Ward.id
     ).join(
@@ -780,7 +838,7 @@ async def get_unassigned_pus(
     ).join(
         State, LGA.state_id == State.id
     ).outerjoin(
-        User, *coverage_filters
+        User, coverage_onclause
     ).where(User.id.is_(None))
 
     # Apply Geo Filters
@@ -796,9 +854,9 @@ async def get_unassigned_pus(
     ).join(
         State, LGA.state_id == State.id
     ).outerjoin(
-        User, *coverage_filters
+        User, coverage_onclause
     ).where(User.id.is_(None))
-    
+
     if state_id: count_stmt = count_stmt.where(State.id == state_id)
     if lga_id: count_stmt = count_stmt.where(LGA.id == lga_id)
     if ward_id: count_stmt = count_stmt.where(Ward.id == ward_id)
@@ -1127,13 +1185,20 @@ async def get_all_documents(
     search: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    client_id: Optional[str] = None,
+    election_id: Optional[str] = None,
+    state_id: Optional[str] = None,
+    lga_id: Optional[str] = None,
+    ward_id: Optional[str] = None,
+    pu_id: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(RequirePermission("view_results")),
 ):
     """
     Document feed for the admin portal: every collated result with its
     evidence, geography breakdown, and on-chain anchor. Paginated, searchable
-    by PU code/name, and filterable by upload date (YYYY-MM-DD).
+    by PU code/name, filterable by upload date (YYYY-MM-DD), and narrowed by
+    the client -> election -> state -> lga -> ward -> pu hierarchy.
     Scoped to the caller's institution's elections.
     """
     from sqlalchemy import and_
@@ -1144,6 +1209,9 @@ async def get_all_documents(
     scoped_ids = await client_scope_election_ids(db, user)
     if scoped_ids is not None:
         conditions.append(Result.election_id.in_(scoped_ids))
+    if election_id:
+        await _assert_election_geo_visible(db, user, election_id)
+        conditions.append(Result.election_id == election_id)
     if search:
         like = f"%{search}%"
         conditions.append(
@@ -1159,20 +1227,32 @@ async def get_all_documents(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
 
+    # Geo hierarchy filters — the election scope still bounds what is visible.
+    if state_id: conditions.append(State.id == state_id)
+    if lga_id: conditions.append(LGA.id == lga_id)
+    if ward_id: conditions.append(Ward.id == ward_id)
+    if pu_id: conditions.append(PollingUnit.id == pu_id)
+
     stmt = (
-        select(Result, PollingUnit, Ward, LGA, State)
+        select(Result, PollingUnit, Ward, LGA, State, Election)
         .join(PollingUnit, Result.pu_id == PollingUnit.id)
         .join(Ward, PollingUnit.ward_id == Ward.id, isouter=True)
         .join(LGA, Ward.lga_id == LGA.id, isouter=True)
         .join(State, LGA.state_id == State.id, isouter=True)
+        .join(Election, Result.election_id == Election.id, isouter=True)
     )
+    # Client tenancy: client admins are confined by scoped_ids above; platform
+    # staff may narrow by any client.
+    effective_client_id = user.client_id if user.client_id is not None else client_id
+    if effective_client_id:
+        stmt = stmt.where(Election.client_id == effective_client_id)
     if conditions:
         stmt = stmt.where(and_(*conditions))
     stmt = stmt.order_by(Result.uploaded_at.desc()).offset(skip).limit(min(limit, 200))
 
     res = await db.execute(stmt)
     documents = []
-    for result, pu, ward, lga, state in res.all():
+    for result, pu, ward, lga, state, election in res.all():
         documents.append({
             "id": result.id,
             "image_url": _public_evidence_url(result.image_url),
@@ -1182,6 +1262,8 @@ async def get_all_documents(
             "ward": ward.name if ward else None,
             "lga": lga.name if lga else None,
             "state": state.name if state else None,
+            "election_code": election.code if election else None,
+            "election_name": election.name if election else None,
             "party_a": result.party_a_votes,
             "party_b": result.party_b_votes,
             "party_c": result.party_c_votes,

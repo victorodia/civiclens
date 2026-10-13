@@ -12,7 +12,20 @@ const CoverageAudit = ({ setActiveView }) => {
     const [lgas, setLgas] = useState([]);
     const [wards, setWards] = useState([]);
 
+    // Filter hierarchy: client -> election -> state -> lga -> ward. With an
+    // election chosen, a "gap" means a PU inside that election's scope with
+    // no agent accredited for THAT race; the geo options come from the
+    // scope-filtered endpoints.
+    const isPlatformAdmin = (() => {
+        try { return !localStorage.getItem('adminClientId'); } catch (e) { return false; }
+    })();
+
+    const [clients, setClients] = useState([]);
+    const [elections, setElections] = useState([]);
+
     const [filters, setFilters] = useState({
+        client_id: '',
+        election_id: '',
         state_id: '',
         lga_id: '',
         ward_id: ''
@@ -20,24 +33,36 @@ const CoverageAudit = ({ setActiveView }) => {
     const [highRiskOnly, setHighRiskOnly] = useState(false);
 
     useEffect(() => {
-        fetchStates();
+        (async () => {
+            try {
+                const [cRes, eRes] = await Promise.all([
+                    isPlatformAdmin ? fetch('/admin/clients') : Promise.resolve(null),
+                    fetch('/admin/elections'),
+                ]);
+                if (cRes && cRes.ok) setClients((await cRes.json()).clients || []);
+                if (eRes.ok) setElections((await eRes.json()).elections || []);
+            } catch (e) { console.error(e); }
+        })();
         fetchGaps();
     }, []);
 
-    const fetchStates = async () => {
-        try {
-            const res = await fetch('/admin/geo/states');
-            if (res.ok) setStates(await res.json());
-        } catch (e) { console.error(e); }
-    };
+    const visibleElections = isPlatformAdmin && filters.client_id
+        ? elections.filter(e => e.client_id === filters.client_id)
+        : elections;
+
+    const geoQuery = (electionId = filters.election_id) =>
+        electionId ? `?election_id=${electionId}` : '';
 
     const fetchGaps = async () => {
         setIsLoading(true);
         try {
+            const f = filters;
             const queryParams = new URLSearchParams();
-            if (filters.state_id) queryParams.append('state_id', filters.state_id);
-            if (filters.lga_id) queryParams.append('lga_id', filters.lga_id);
-            if (filters.ward_id) queryParams.append('ward_id', filters.ward_id);
+            if (f.client_id) queryParams.append('client_id', f.client_id);
+            if (f.election_id) queryParams.append('election_id', f.election_id);
+            if (f.state_id) queryParams.append('state_id', f.state_id);
+            if (f.lga_id) queryParams.append('lga_id', f.lga_id);
+            if (f.ward_id) queryParams.append('ward_id', f.ward_id);
             queryParams.append('limit', '100'); // Balanced for rendering performance
 
             const res = await fetch(`/admin/unassigned-pus?${queryParams.toString()}`);
@@ -56,39 +81,53 @@ const CoverageAudit = ({ setActiveView }) => {
     const handleFilterChange = (key, value) => {
         setFilters(prev => {
             const next = { ...prev, [key]: value };
+            if (key === 'client_id') return { ...next, election_id: '', state_id: '', lga_id: '', ward_id: '' };
+            if (key === 'election_id') return { ...next, state_id: '', lga_id: '', ward_id: '' };
             if (key === 'state_id') return { ...next, lga_id: '', ward_id: '' };
             if (key === 'lga_id') return { ...next, ward_id: '' };
             return next;
         });
 
+        if (key === 'client_id') {
+            setStates([]); setLgas([]); setWards([]);
+        }
+        if (key === 'election_id') {
+            setLgas([]); setWards([]);
+            if (value) {
+                fetch(`/admin/geo/states${geoQuery(value)}`)
+                    .then(r => (r.ok ? r.json() : []))
+                    .then(setStates)
+                    .catch(() => setStates([]));
+            } else {
+                setStates([]);
+            }
+        }
         if (key === 'state_id') {
-            if (value) fetchLgas(value); else setLgas([]);
             setWards([]);
+            if (value) {
+                fetch(`/admin/geo/states/${value}/lgas${geoQuery()}`)
+                    .then(r => (r.ok ? r.json() : []))
+                    .then(setLgas)
+                    .catch(() => setLgas([]));
+            } else {
+                setLgas([]);
+            }
         }
         if (key === 'lga_id') {
-            if (value) fetchWards(value); else setWards([]);
+            if (value) {
+                fetch(`/admin/geo/lgas/${value}/wards${geoQuery()}`)
+                    .then(r => (r.ok ? r.json() : []))
+                    .then(setWards)
+                    .catch(() => setWards([]));
+            } else {
+                setWards([]);
+            }
         }
-    };
-
-    const fetchLgas = async (stateId) => {
-        if (!stateId) { setLgas([]); return; }
-        try {
-            const res = await fetch(`/admin/geo/states/${stateId}/lgas`);
-            if (res.ok) setLgas(await res.json());
-        } catch (e) { console.error(e); }
-    };
-
-    const fetchWards = async (lgaId) => {
-        if (!lgaId) { setWards([]); return; }
-        try {
-            const res = await fetch(`/admin/geo/lgas/${lgaId}/wards`);
-            if (res.ok) setWards(await res.json());
-        } catch (e) { console.error(e); }
     };
 
     useEffect(() => {
         fetchGaps();
-    }, [filters.state_id, filters.lga_id, filters.ward_id]);
+    }, [filters.client_id, filters.election_id, filters.state_id, filters.lga_id, filters.ward_id]);
 
     return (
         <div className="space-y-6 animate-in fade-in duration-500">
@@ -105,15 +144,42 @@ const CoverageAudit = ({ setActiveView }) => {
 
             {/* Filter Hub */}
             <div className="bg-white dark:bg-gray-900 p-6 rounded-[2.5rem] border border-gray-100 dark:border-gray-800 shadow-xl">
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+                    {isPlatformAdmin && (
+                        <div className="space-y-1.5">
+                            <label className="text-[9px] font-black text-gray-400 uppercase tracking-widest ml-1">Client</label>
+                            <select
+                                value={filters.client_id}
+                                onChange={(e) => handleFilterChange('client_id', e.target.value)}
+                                className="w-full px-4 py-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-950 text-[9px] font-bold uppercase outline-none focus:ring-2 focus:ring-red-500"
+                            >
+                                <option value="">All Clients</option>
+                                {clients.map(cl => <option key={cl.id} value={cl.id}>{cl.name}</option>)}
+                            </select>
+                        </div>
+                    )}
+
+                    <div className="space-y-1.5">
+                        <label className="text-[9px] font-black text-gray-400 uppercase tracking-widest ml-1">Election</label>
+                        <select
+                            value={filters.election_id}
+                            onChange={(e) => handleFilterChange('election_id', e.target.value)}
+                            className="w-full px-4 py-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-950 text-[9px] font-bold uppercase outline-none focus:ring-2 focus:ring-red-500"
+                        >
+                            <option value="">{isPlatformAdmin ? 'Whole Registry' : 'Select election'}</option>
+                            {visibleElections.map(el => <option key={el.id} value={el.id}>{el.name} ({el.code})</option>)}
+                        </select>
+                    </div>
+
                     <div className="space-y-1.5">
                         <label className="text-[9px] font-black text-gray-400 uppercase tracking-widest ml-1">State</label>
                         <select
                             value={filters.state_id}
                             onChange={(e) => handleFilterChange('state_id', e.target.value)}
-                            className="w-full px-4 py-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-950 text-[9px] font-bold uppercase outline-none focus:ring-2 focus:ring-red-500"
+                            disabled={!filters.election_id}
+                            className="w-full px-4 py-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-950 text-[9px] font-bold uppercase outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50"
                         >
-                            <option value="">All States</option>
+                            <option value="">{filters.election_id ? 'All States' : 'Pick an election first'}</option>
                             {states.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                         </select>
                     </div>

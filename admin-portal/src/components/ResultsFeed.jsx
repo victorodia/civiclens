@@ -163,7 +163,29 @@ const ResultsFeed = () => {
     const [fullImageOpen, setFullImageOpen] = useState(false);
     const [currentImage, setCurrentImage] = useState(null);
     const { showNotification } = useNotification();
-    
+
+    // Filter hierarchy: client -> election -> state -> lga -> ward -> pu.
+    // All of it is applied server-side; the geo dropdowns only ever offer
+    // what is inside the selected election's scope.
+    const isPlatformAdmin = (() => {
+        try { return !localStorage.getItem('adminClientId'); } catch (e) { return false; }
+    })();
+
+    const [clients, setClients] = useState([]);
+    const [elections, setElections] = useState([]);
+    const [states, setStates] = useState([]);
+    const [lgas, setLgas] = useState([]);
+    const [wards, setWards] = useState([]);
+    const [pus, setPus] = useState([]);
+    const [filters, setFilters] = useState({
+        client_id: '',
+        election_id: '',
+        state_id: '',
+        lga_id: '',
+        ward_id: '',
+        pu_id: '',
+    });
+
     // New Advanced Filters State
     const [searchQuery, setSearchQuery] = useState('');
     const [startDate, setStartDate] = useState('');
@@ -171,6 +193,26 @@ const ResultsFeed = () => {
     const [page, setPage] = useState(0);
     const [hasMore, setHasMore] = useState(true);
     const limit = 50;
+
+    useEffect(() => {
+        (async () => {
+            try {
+                const [cRes, eRes] = await Promise.all([
+                    isPlatformAdmin ? fetch('/admin/clients') : Promise.resolve(null),
+                    fetch('/admin/elections'),
+                ]);
+                if (cRes && cRes.ok) setClients((await cRes.json()).clients || []);
+                if (eRes.ok) setElections((await eRes.json()).elections || []);
+            } catch (e) { console.error(e); }
+        })();
+    }, []);
+
+    const visibleElections = isPlatformAdmin && filters.client_id
+        ? elections.filter(e => e.client_id === filters.client_id)
+        : elections;
+
+    const geoQuery = (electionId = filters.election_id) =>
+        electionId ? `?election_id=${electionId}` : '';
 
     const fetchDocuments = async (pageNum = 0) => {
         if (pageNum === 0) setIsLoading(true);
@@ -184,6 +226,12 @@ const ResultsFeed = () => {
             if (searchQuery) params.append('search', searchQuery);
             if (startDate) params.append('start_date', startDate);
             if (endDate) params.append('end_date', endDate);
+            if (filters.client_id) params.append('client_id', filters.client_id);
+            if (filters.election_id) params.append('election_id', filters.election_id);
+            if (filters.state_id) params.append('state_id', filters.state_id);
+            if (filters.lga_id) params.append('lga_id', filters.lga_id);
+            if (filters.ward_id) params.append('ward_id', filters.ward_id);
+            if (filters.pu_id) params.append('pu_id', filters.pu_id);
 
             const res = await fetch(`/admin/all-documents?${params.toString()}`);
             if (res.ok) {
@@ -215,7 +263,9 @@ const ResultsFeed = () => {
         }, 30000);
 
         return () => clearInterval(intervalId);
-    }, [searchQuery, startDate, endDate, showNotification]);
+    }, [searchQuery, startDate, endDate, showNotification,
+        filters.client_id, filters.election_id, filters.state_id,
+        filters.lga_id, filters.ward_id, filters.pu_id]);
 
     const [proofModalDoc, setProofModalDoc] = useState(null);
     const [trailModalDoc, setTrailModalDoc] = useState(null);
@@ -225,23 +275,66 @@ const ResultsFeed = () => {
         showNotification(`${type} copied to clipboard!`, "success");
     };
 
-    const [filterState, setFilterState] = useState('');
-    const [filterLGA, setFilterLGA] = useState('');
-    const [filterWard, setFilterWard] = useState('');
-    const [filterPU, setFilterPU] = useState('');
+    // Cascade: each level resets everything below it and (when an election
+    // is involved) reloads from the scope-filtered geo endpoints.
+    const handleFilterChange = (key, value) => {
+        setFilters(prev => {
+            const next = { ...prev, [key]: value };
+            if (key === 'client_id') return { ...next, election_id: '', state_id: '', lga_id: '', ward_id: '', pu_id: '' };
+            if (key === 'election_id') return { ...next, state_id: '', lga_id: '', ward_id: '', pu_id: '' };
+            if (key === 'state_id') return { ...next, lga_id: '', ward_id: '', pu_id: '' };
+            if (key === 'lga_id') return { ...next, ward_id: '', pu_id: '' };
+            if (key === 'ward_id') return { ...next, pu_id: '' };
+            return next;
+        });
 
-    const uniqueStates = [...new Set(documents.map(d => d.state).filter(Boolean))].sort();
-    const uniqueLGAs = filterState ? [...new Set(documents.filter(d => d.state === filterState).map(d => d.lga).filter(Boolean))].sort() : [];
-    const uniqueWards = filterLGA ? [...new Set(documents.filter(d => d.lga === filterLGA).map(d => d.ward).filter(Boolean))].sort() : [];
-    const uniquePUs = filterWard ? [...new Set(documents.filter(d => d.ward === filterWard).map(d => d.pu_code).filter(Boolean))].sort() : [];
-
-    const filteredDocuments = documents.filter(doc => {
-        if (filterState && doc.state !== filterState) return false;
-        if (filterLGA && doc.lga !== filterLGA) return false;
-        if (filterWard && doc.ward !== filterWard) return false;
-        if (filterPU && doc.pu_code !== filterPU) return false;
-        return true;
-    });
+        if (key === 'client_id') {
+            setStates([]); setLgas([]); setWards([]); setPus([]);
+        }
+        if (key === 'election_id') {
+            setLgas([]); setWards([]); setPus([]);
+            if (value) {
+                fetch(`/admin/geo/states${geoQuery(value)}`)
+                    .then(r => (r.ok ? r.json() : []))
+                    .then(setStates)
+                    .catch(() => setStates([]));
+            } else {
+                setStates([]);
+            }
+        }
+        if (key === 'state_id') {
+            setWards([]); setPus([]);
+            if (value) {
+                fetch(`/admin/geo/states/${value}/lgas${geoQuery()}`)
+                    .then(r => (r.ok ? r.json() : []))
+                    .then(setLgas)
+                    .catch(() => setLgas([]));
+            } else {
+                setLgas([]);
+            }
+        }
+        if (key === 'lga_id') {
+            setPus([]);
+            if (value) {
+                fetch(`/admin/geo/lgas/${value}/wards${geoQuery()}`)
+                    .then(r => (r.ok ? r.json() : []))
+                    .then(setWards)
+                    .catch(() => setWards([]));
+            } else {
+                setWards([]);
+            }
+        }
+        if (key === 'ward_id') {
+            if (value) {
+                fetch(`/admin/geo/wards/${value}/pus${geoQuery()}`)
+                    .then(r => (r.ok ? r.json() : []))
+                    .then(setPus)
+                    .catch(() => setPus([]));
+            } else {
+                setPus([]);
+            }
+        }
+    };
 
     const downloadReceipt = (doc) => {
         const receiptText = `CIVICLENS BLOCKCHAIN CERTIFICATE OF IMMUTABILITY\n\n` +
@@ -267,13 +360,14 @@ const ResultsFeed = () => {
     };
 
     const downloadCSV = () => {
-        if (filteredDocuments.length === 0) {
+        if (documents.length === 0) {
             showNotification("No data to export", "error");
             return;
         }
 
-        const headers = ["State", "LGA", "Ward", "PU Code", "PU Name", "Party A", "Party B", "Party C", "Uploaded At", "Blockchain Hash", "Transaction ID"];
-        const rows = filteredDocuments.map(doc => [
+        const headers = ["Election", "State", "LGA", "Ward", "PU Code", "PU Name", "Party A", "Party B", "Party C", "Uploaded At", "Blockchain Hash", "Transaction ID"];
+        const rows = documents.map(doc => [
+            doc.election_code || "",
             doc.state || "",
             doc.lga || "",
             doc.ward || "",
@@ -425,7 +519,7 @@ const ResultsFeed = () => {
                     <FileText className="w-5 h-5 text-brand" />
                     <span>Uploaded Documents Feed</span>
                 </h3>
-                <span className="text-[10px] font-black bg-gray-100 dark:bg-gray-800 px-3 py-1 rounded-full whitespace-nowrap">{filteredDocuments.length} Results Filtered</span>
+                <span className="text-[10px] font-black bg-gray-100 dark:bg-gray-800 px-3 py-1 rounded-full whitespace-nowrap">{documents.length} Results</span>
             </div>
 
             <div className="bg-white dark:bg-gray-950 p-4 rounded-xl border border-gray-100 dark:border-gray-800 shadow-sm space-y-4">
@@ -464,52 +558,77 @@ const ResultsFeed = () => {
                     </button>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-4 border-t border-gray-100 dark:border-gray-800 pt-4">
+                <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-4 border-t border-gray-100 dark:border-gray-800 pt-4">
+                    {isPlatformAdmin && (
+                        <div>
+                            <label className="block text-xs font-bold text-gray-500 mb-1">Client</label>
+                            <select
+                                className="w-full bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-800 text-sm rounded-lg focus:ring-brand focus:border-brand p-2"
+                                value={filters.client_id}
+                                onChange={(e) => handleFilterChange('client_id', e.target.value)}
+                            >
+                                <option value="">All Clients</option>
+                                {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                            </select>
+                        </div>
+                    )}
+                    <div>
+                        <label className="block text-xs font-bold text-gray-500 mb-1">Election</label>
+                        <select
+                            className="w-full bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-800 text-sm rounded-lg focus:ring-brand focus:border-brand p-2"
+                            value={filters.election_id}
+                            onChange={(e) => handleFilterChange('election_id', e.target.value)}
+                        >
+                            <option value="">All Elections</option>
+                            {visibleElections.map(el => <option key={el.id} value={el.id}>{el.name} ({el.code})</option>)}
+                        </select>
+                    </div>
                     <div>
                         <label className="block text-xs font-bold text-gray-500 mb-1">State</label>
-                        <select 
-                            className="w-full bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-800 text-sm rounded-lg focus:ring-brand focus:border-brand p-2"
-                            value={filterState}
-                            onChange={(e) => { setFilterState(e.target.value); setFilterLGA(''); setFilterWard(''); setFilterPU(''); }}
+                        <select
+                            className="w-full bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-800 text-sm rounded-lg focus:ring-brand focus:border-brand p-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                            value={filters.state_id}
+                            onChange={(e) => handleFilterChange('state_id', e.target.value)}
+                            disabled={!filters.election_id}
                         >
-                            <option value="">All States</option>
-                            {uniqueStates.map(s => <option key={s} value={s}>{s}</option>)}
+                            <option value="">{filters.election_id ? "All States" : "Pick an election first"}</option>
+                            {states.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                         </select>
                     </div>
                     <div>
                         <label className="block text-xs font-bold text-gray-500 mb-1">Local Government</label>
-                        <select 
+                        <select
                             className="w-full bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-800 text-sm rounded-lg focus:ring-brand focus:border-brand p-2 disabled:opacity-50 disabled:cursor-not-allowed"
-                            value={filterLGA}
-                            onChange={(e) => { setFilterLGA(e.target.value); setFilterWard(''); setFilterPU(''); }}
-                            disabled={!filterState}
+                            value={filters.lga_id}
+                            onChange={(e) => handleFilterChange('lga_id', e.target.value)}
+                            disabled={!filters.state_id}
                         >
-                            <option value="">{filterState ? "All LGAs" : "Select State First"}</option>
-                            {uniqueLGAs.map(l => <option key={l} value={l}>{l}</option>)}
+                            <option value="">{filters.state_id ? "All LGAs" : "Select State First"}</option>
+                            {lgas.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
                         </select>
                     </div>
                     <div>
                         <label className="block text-xs font-bold text-gray-500 mb-1">Ward</label>
-                        <select 
+                        <select
                             className="w-full bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-800 text-sm rounded-lg focus:ring-brand focus:border-brand p-2 disabled:opacity-50 disabled:cursor-not-allowed"
-                            value={filterWard}
-                            onChange={(e) => { setFilterWard(e.target.value); setFilterPU(''); }}
-                            disabled={!filterLGA}
+                            value={filters.ward_id}
+                            onChange={(e) => handleFilterChange('ward_id', e.target.value)}
+                            disabled={!filters.lga_id}
                         >
-                            <option value="">{filterLGA ? "All Wards" : "Select LGA First"}</option>
-                            {uniqueWards.map(w => <option key={w} value={w}>{w}</option>)}
+                            <option value="">{filters.lga_id ? "All Wards" : "Select LGA First"}</option>
+                            {wards.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
                         </select>
                     </div>
                     <div>
                         <label className="block text-xs font-bold text-gray-500 mb-1">Polling Unit</label>
-                        <select 
+                        <select
                             className="w-full bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-800 text-sm rounded-lg focus:ring-brand focus:border-brand p-2 disabled:opacity-50 disabled:cursor-not-allowed"
-                            value={filterPU}
-                            onChange={(e) => setFilterPU(e.target.value)}
-                            disabled={!filterWard}
+                            value={filters.pu_id}
+                            onChange={(e) => handleFilterChange('pu_id', e.target.value)}
+                            disabled={!filters.ward_id}
                         >
-                            <option value="">{filterWard ? "All Polling Units" : "Select Ward First"}</option>
-                            {uniquePUs.map(p => <option key={p} value={p}>{p}</option>)}
+                            <option value="">{filters.ward_id ? "All Polling Units" : "Select Ward First"}</option>
+                            {pus.map(p => <option key={p.id} value={p.id}>{p.name} ({p.code})</option>)}
                         </select>
                     </div>
                 </div>
@@ -519,7 +638,7 @@ const ResultsFeed = () => {
                 <div className="flex justify-center p-12">
                     <div className="w-8 h-8 border-4 border-brand border-t-transparent rounded-full animate-spin"></div>
                 </div>
-            ) : filteredDocuments.length === 0 ? (
+            ) : documents.length === 0 ? (
                 <div className="bg-white dark:bg-gray-950 p-12 rounded-2xl border border-gray-100 dark:border-gray-800 text-center shadow-xl">
                     <AlertCircle className="w-12 h-12 text-gray-400 mx-auto mb-4 opacity-50" />
                     <h3 className="font-black text-gray-400 uppercase tracking-widest text-sm">No Documents Found</h3>
@@ -527,7 +646,7 @@ const ResultsFeed = () => {
             ) : (
                 <>
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                        {filteredDocuments.map((doc) => (
+                        {documents.map((doc) => (
                             <div key={doc.id} className="bg-white dark:bg-gray-950 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-800 overflow-hidden">
                                 <div className="p-4 border-b border-gray-50 dark:border-gray-800">
                                     <div className="flex justify-between items-center mb-1">
@@ -537,6 +656,11 @@ const ResultsFeed = () => {
                                     <div className="text-[9px] text-gray-500 font-medium truncate uppercase">
                                         {doc.state} • {doc.lga} • {doc.ward}
                                     </div>
+                                    {doc.election_code && (
+                                        <span className="inline-block mt-1 text-[8px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded bg-brand/10 text-brand" title={doc.election_name}>
+                                            🗳 {doc.election_code}
+                                        </span>
+                                    )}
                                 </div>
                                 
                                 <div 
