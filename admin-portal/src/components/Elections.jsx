@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { Vote, Plus, MapPin, Save, ChevronDown, ChevronUp } from 'lucide-react';
+import { Vote, Plus, MapPin, Save, ChevronDown, ChevronUp, Trash2 } from 'lucide-react';
 import { useElection } from '../contexts/ElectionContext';
 import { useNotification } from '../contexts/NotificationContext';
 
@@ -210,7 +210,7 @@ function ScopeEditor({ election, onDone }) {
 
 const Elections = ({ setActiveView }) => {
     const { elections, refresh, setActiveElection } = useElection();
-    const { showNotification } = useNotification();
+    const { showNotification, showDialog } = useNotification();
     const [showCreate, setShowCreate] = useState(false);
     const [scopeFor, setScopeFor] = useState(null);
     const [form, setForm] = useState({ name: '', code: '', type: 'gubernatorial', party_a_name: '', party_b_name: '', party_c_name: '', client_id: '' });
@@ -275,6 +275,57 @@ const Elections = ({ setActiveView }) => {
             if (res.ok) { showNotification(`${e.name} is now ${status}.`, 'success'); refresh(); }
             else showNotification('Status change failed.', 'error');
         } catch (e2) { showNotification('Network error.', 'error'); }
+    };
+
+    // Permanently trash an election and everything bound to it. Same guarded
+    // two-step as the factory reset: admin security key first, then the 2FA
+    // code when the account has TOTP enabled.
+    const deleteElection = async (e) => {
+        const password = await showDialog({
+            title: 'Delete Election',
+            message: `DANGER: "${e.name}" (${e.code}) and everything bound to it will be permanently trashed — its results, evidence files, check-ins, GPS pings and assignments. Field agents accredited ONLY to this election lose their accounts; agents shared with other elections are kept. This cannot be undone. Enter Admin Security Key to confirm:`
+        });
+        if (!password) return;
+
+        setSaving(true);
+        try {
+            let res = await fetch(`/admin/elections/${e.id}`, {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ admin_password: password }),
+            });
+            let data = await res.json().catch(() => ({}));
+
+            // 2FA challenge — prompt for the TOTP code and retry with both.
+            if (res.status === 401 && data.detail === '2FA_CODE_REQUIRED') {
+                const code = await showDialog({
+                    title: 'Two-Factor Authentication',
+                    message: 'This account has 2FA enabled. Enter the 6-digit code from your authenticator app to authorize the deletion:'
+                });
+                if (!code) {
+                    showNotification('Election deletion cancelled.', 'error');
+                    return;
+                }
+                res = await fetch(`/admin/elections/${e.id}`, {
+                    method: 'DELETE',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ admin_password: password, totp_code: code.trim() }),
+                });
+                data = await res.json().catch(() => ({}));
+            }
+
+            if (res.ok) {
+                showNotification(data.message || `Election "${e.name}" deleted.`, 'success');
+                if (scopeFor === e.id) setScopeFor(null);
+                await refresh();
+            } else {
+                showNotification(data.detail || 'Deletion failed.', 'error');
+            }
+        } catch (err) {
+            showNotification('Network error.', 'error');
+        } finally {
+            setSaving(false);
+        }
     };
 
     return (
@@ -376,6 +427,10 @@ const Elections = ({ setActiveView }) => {
                         <button className="text-[10px] font-black uppercase tracking-widest text-brand flex items-center space-x-1"
                             onClick={() => { setActiveElection(e.id); setActiveView && setActiveView('livemap'); }}>
                             <MapPin className="w-3 h-3" /><span>Live map</span>
+                        </button>
+                        <button className="text-[10px] font-black uppercase tracking-widest text-red-600 dark:text-red-400 flex items-center space-x-1 ml-auto"
+                            onClick={() => deleteElection(e)}>
+                            <Trash2 className="w-3 h-3" /><span>Delete</span>
                         </button>
                     </div>
 

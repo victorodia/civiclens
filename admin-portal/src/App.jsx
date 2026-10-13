@@ -258,11 +258,16 @@ window.fetch = async (url, options = {}) => {
     const response = await originalFetch(url, options);
     
     // Zero-vulnerability fallback: Auto-logout on 401 Unauthorized.
-    // EXEMPT /auth/login (failed logins 401 normally) and /admin/factory-reset:
-    // that endpoint returns a 401 challenge (2FA_CODE_REQUIRED / wrong key) which
-    // the caller handles in-page — nuking the session here would break the flow
-    // and bounce the user to the login screen mid-operation.
-    const isExempt = typeof url === 'string' && (url.includes('/auth/login') || url.includes('/admin/factory-reset'));
+    // EXEMPT /auth/login (failed logins 401 normally), /admin/factory-reset and
+    // DELETE /admin/elections/*: those endpoints return a 401 challenge
+    // (2FA_CODE_REQUIRED / wrong key) which the caller handles in-page —
+    // nuking the session here would break the flow and bounce the user to the
+    // login screen mid-operation.
+    const isExempt = typeof url === 'string' && (
+        url.includes('/auth/login') ||
+        url.includes('/admin/factory-reset') ||
+        ((options.method || 'GET').toUpperCase() === 'DELETE' && url.includes('/admin/elections'))
+    );
     if (response.status === 401 && !isExempt) {
         console.warn('Security Token Expired or Invalid. Logging out.');
         localStorage.clear();

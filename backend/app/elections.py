@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .db import get_db
 from .models import (
     User, Election, ElectionPU, AgentAssignment, AgentCheckIn,
-    PollingUnit, Ward, LGA, State, Result, Client,
+    PollingUnit, Ward, LGA, State, Result, Client, AgentLocationPing,
 )
 from .security import RequirePermission, log_audit
 
@@ -414,6 +414,122 @@ async def set_election_scope(
                             f"{getattr(removed, 'rowcount', '?')} assignments dropped")
     await db.commit()
     return {"status": "success", "election_id": election_id, "pus": n_pus}
+
+
+class ElectionDeleteSchema(BaseModel):
+    admin_password: str
+    totp_code: Optional[str] = None  # required only when the caller has 2FA enabled
+
+
+@router.delete("/elections/{election_id}")
+async def delete_election(
+    election_id: str,
+    payload: ElectionDeleteSchema,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(RequirePermission("provision_agents")),
+):
+    """
+    Delete an election AND everything bound to it: its results (including
+    evidence files on disk), check-ins, GPS pings, assignments and scope
+    rows. Field agents whose ONLY accreditation was this election are
+    trashed too; agents still assigned to other elections are kept and
+    simply lose this one. Requires administrative re-authentication, plus
+    the 2FA code when the caller has TOTP enabled.
+    """
+    from .security import verify_password
+    import pyotp
+
+    # 1. Administrative re-authentication.
+    if not verify_password(payload.admin_password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Election deletion aborted: incorrect administrative security key."
+        )
+
+    # 1b. MFA challenge — the client sends the password first; on this
+    #     challenge it prompts for the TOTP code and retries with both.
+    if user.is_2fa_enabled:
+        if not payload.totp_code:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                                detail="2FA_CODE_REQUIRED")
+        if not pyotp.TOTP(user.totp_secret).verify(payload.totp_code, valid_window=1):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                                detail="Invalid or expired 2FA code.")
+
+    # 2. Resolve the election (client tenancy respected).
+    election = (await db.execute(select(Election).where(Election.id == election_id))).scalar_one_or_none()
+    if not election:
+        raise HTTPException(404, "Election not found.")
+    assert_in_scope(election.id, await client_scope_election_ids(db, user))
+
+    # 3. Capture agents accredited for THIS election and evidence filenames
+    #    BEFORE any rows are deleted.
+    candidate_ids = [r[0] for r in (await db.execute(
+        select(AgentAssignment.agent_id)
+        .where(AgentAssignment.election_id == election_id)
+        .distinct())).all()]
+    media_rows = (await db.execute(text(
+        "SELECT image_url, video_url FROM results WHERE election_id = :e"),
+        {"e": election_id})).all()
+    filenames = set()
+    for row in media_rows:
+        for u in (row[0], row[1]):
+            if u:
+                filenames.add(u.rsplit("/", 1)[-1])
+
+    # 4. Child-before-parent purge of everything bound to the election.
+    res = await db.execute(text("DELETE FROM results WHERE election_id = :e"), {"e": election_id})
+    n_results = getattr(res, "rowcount", -1)
+    await db.execute(text("DELETE FROM agent_checkins WHERE election_id = :e"), {"e": election_id})
+    await db.execute(text("DELETE FROM agent_location_pings WHERE election_id = :e"), {"e": election_id})
+    await db.execute(text("DELETE FROM agent_assignments WHERE election_id = :e"), {"e": election_id})
+    await db.execute(text("DELETE FROM election_polling_units WHERE election_id = :e"), {"e": election_id})
+
+    # 5. Evidence files off disk.
+    import os as _os
+    _upload_dir = _os.path.join(_os.getcwd(), "app", "static", "uploads")
+    n_files = 0
+    for fn in filenames:
+        p = _os.path.join(_upload_dir, fn)
+        if _os.path.isfile(p):
+            try:
+                _os.remove(p)
+                n_files += 1
+            except OSError:
+                pass
+
+    # 6. Trash agents whose only accreditation was this election — an agent
+    #    with ANY remaining footprint (other assignments, results, check-ins
+    #    or pings anywhere) is kept.
+    n_agents = 0
+    if candidate_ids:
+        has_footprint = (
+            select(AgentAssignment.agent_id).where(AgentAssignment.agent_id == User.id).exists()
+            | select(Result.agent_id).where(Result.agent_id == User.id).exists()
+            | select(AgentCheckIn.agent_id).where(AgentCheckIn.agent_id == User.id).exists()
+            | select(AgentLocationPing.agent_id).where(AgentLocationPing.agent_id == User.id).exists()
+        )
+        r = await db.execute(delete(User).where(User.id.in_(candidate_ids)).where(~has_footprint))
+        n_agents = getattr(r, "rowcount", -1)
+
+    # 7. The election itself + audit trail.
+    await db.execute(text("DELETE FROM elections WHERE id = :e"), {"e": election_id})
+    await log_audit(
+        db,
+        actor_id=str(user.id),
+        action="ELECTION_DELETE",
+        target_id=election_id,
+        details=f"Election {election.name!r} ({election.code}) deleted: {n_results} result(s), "
+                f"{n_files} evidence file(s), {n_agents} exclusive agent account(s) trashed."
+    )
+    await db.commit()
+
+    return {
+        "status": "deleted",
+        "election_id": election_id,
+        "message": f"Election {election.name} and everything bound to it deleted "
+                   f"({n_results} results, {n_files} evidence files, {n_agents} exclusive agents)."
+    }
 
 
 @router.get("/elections/{election_id}/assignments")
