@@ -1276,12 +1276,19 @@ async def get_all_documents(
 
 @router.get("/pending-verifications")
 async def get_pending_verifications(
+    client_id: Optional[str] = None,
+    election_id: Optional[str] = None,
+    state_id: Optional[str] = None,
+    lga_id: Optional[str] = None,
+    ward_id: Optional[str] = None,
+    pu_id: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(RequirePermission("view_results")),
 ):
     """
     AI review queue: results the OCR flagged as diverging from the agent's
-    entered figures, not yet cleared by a human verifier.
+    entered figures, not yet cleared by a human verifier. NARROWED by the
+    client -> election -> geo hierarchy like every other operational view.
     Scoped to the caller's institution's elections.
     """
     from .elections import client_scope_election_ids
@@ -1289,15 +1296,33 @@ async def get_pending_verifications(
     scoped_ids = await client_scope_election_ids(db, user)
     if scoped_ids is not None:
         conditions.append(Result.election_id.in_(scoped_ids))
+    if election_id:
+        await _assert_election_geo_visible(db, user, election_id)
+        conditions.append(Result.election_id == election_id)
+    if state_id: conditions.append(State.id == state_id)
+    if lga_id: conditions.append(LGA.id == lga_id)
+    if ward_id: conditions.append(Ward.id == ward_id)
+    if pu_id: conditions.append(PollingUnit.id == pu_id)
+
     stmt = (
-        select(Result, PollingUnit)
+        select(Result, PollingUnit, Ward, LGA, State, Election)
         .join(PollingUnit, Result.pu_id == PollingUnit.id)
+        .join(Ward, PollingUnit.ward_id == Ward.id, isouter=True)
+        .join(LGA, Ward.lga_id == LGA.id, isouter=True)
+        .join(State, LGA.state_id == State.id, isouter=True)
+        .join(Election, Result.election_id == Election.id, isouter=True)
         .where(*conditions)
         .order_by(Result.uploaded_at.desc())
     )
+    # Client tenancy: client admins are confined by scoped_ids above; platform
+    # staff may narrow by any client.
+    effective_client_id = user.client_id if user.client_id is not None else client_id
+    if effective_client_id:
+        stmt = stmt.where(Election.client_id == effective_client_id)
+
     res = await db.execute(stmt)
     queue = []
-    for result, pu in res.all():
+    for result, pu, ward, lga, state, election in res.all():
         queue.append({
             "id": result.id,
             "pu_code": pu.pu_code if pu else None,
@@ -1311,6 +1336,8 @@ async def get_pending_verifications(
             "ai_confidence": result.ai_confidence,
             "captured_at": result.captured_at.isoformat() if result.captured_at else None,
             "gps_trail_flag": result.gps_trail_flag,
+            "election_code": election.code if election else None,
+            "election_name": election.name if election else None,
         })
     return queue
 

@@ -15,27 +15,87 @@ const VerificationScreen = () => {
     const [isLoading, setIsLoading] = useState(true);
     const [fullImageOpen, setFullImageOpen] = useState(false);
 
+    const isPlatformAdmin = !localStorage.getItem('adminClientId');
+    const [filters, setFilters] = useState({ client_id: '', election_id: '', state_id: '', lga_id: '' });
+    const [clients, setClients] = useState([]);
+    const [elections, setElections] = useState([]);
+    const [states, setStates] = useState([]);
+    const [lgas, setLgas] = useState([]);
+
+    const visibleElections = filters.client_id
+        ? elections.filter(e => String(e.client_id) === String(filters.client_id))
+        : elections;
+
     useEffect(() => {
-        const fetchData = async () => {
+        if (!isPlatformAdmin) return;
+        fetch('/admin/clients').then(r => r.ok ? r.json() : []).then(setClients).catch(() => {});
+    }, [isPlatformAdmin]);
+
+    useEffect(() => {
+        fetch('/admin/elections').then(r => r.ok ? r.json() : []).then(setElections).catch(() => {});
+    }, []);
+
+    useEffect(() => {
+        if (!filters.election_id) { setStates([]); return; }
+        fetch(`/admin/geo/states?election_id=${filters.election_id}`)
+            .then(r => r.ok ? r.json() : [])
+            .then(setStates).catch(() => {});
+    }, [filters.election_id]);
+
+    useEffect(() => {
+        if (!filters.state_id) { setLgas([]); return; }
+        const qs = filters.election_id ? `?election_id=${filters.election_id}` : '';
+        fetch(`/admin/geo/states/${filters.state_id}/lgas${qs}`)
+            .then(r => r.ok ? r.json() : [])
+            .then(setLgas).catch(() => {});
+    }, [filters.state_id, filters.election_id]);
+
+    const fetchQueue = async () => {
+        setIsLoading(true);
+        try {
+            const params = new URLSearchParams();
+            if (filters.client_id) params.set('client_id', filters.client_id);
+            if (filters.election_id) params.set('election_id', filters.election_id);
+            if (filters.state_id) params.set('state_id', filters.state_id);
+            if (filters.lga_id) params.set('lga_id', filters.lga_id);
+            const qs = params.toString();
+            const res = await fetch(`/admin/pending-verifications${qs ? '?' + qs : ''}`);
+            if (res.ok) {
+                const data = await res.json();
+                setItems(data);
+                setActiveIndex(0);
+            }
+        } catch (e) {
+            showNotification("Verification Queue Sync Failed. Network integrity check required.", "error");
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    // Initial load: party config + full queue
+    useEffect(() => {
+        (async () => {
             try {
-                // Fetch party config
                 const configRes = await fetch('/admin/election-config');
                 if (configRes.ok) setPartyConfig(await configRes.json());
-
-                // Fetch pending results (mocking the real endpoint for now if not ready, but backend list showed it exists)
-                const res = await fetch('/admin/pending-verifications');
-                if (res.ok) {
-                    const data = await res.json();
-                    setItems(data);
-                }
-            } catch (e) {
-                showNotification("Verification Queue Sync Failed. Network integrity check required.", "error");
-            } finally {
-                setIsLoading(false);
-            }
-        };
-        fetchData();
+            } catch (e) {}
+        })();
     }, []);
+
+    // Refetch queue whenever a filter changes
+    useEffect(() => { fetchQueue(); }, [filters.client_id, filters.election_id, filters.state_id, filters.lga_id]);
+
+    const handleFilterChange = (field, value, next = {}) => {
+        if (field === 'client_id') {
+            setFilters({ client_id: value, election_id: '', state_id: '', lga_id: '' });
+        } else if (field === 'election_id') {
+            setFilters(f => ({ ...f, election_id: value, state_id: '', lga_id: '' }));
+        } else if (field === 'state_id') {
+            setFilters(f => ({ ...f, state_id: value, lga_id: '' }));
+        } else {
+            setFilters(f => ({ ...f, [field]: value }));
+        }
+    };
 
     const current = items[activeIndex];
 
@@ -99,6 +159,46 @@ const VerificationScreen = () => {
                     </motion.div>
                 )}
             </AnimatePresence>
+
+            {/* Queue Filters */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 bg-white dark:bg-gray-900 p-4 rounded-2xl border border-gray-100 dark:border-gray-800 shadow-sm">
+                {isPlatformAdmin && (
+                    <select
+                        value={filters.client_id}
+                        onChange={e => handleFilterChange('client_id', e.target.value)}
+                        className="w-full text-xs font-bold bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand/50 text-gray-700 dark:text-gray-200"
+                    >
+                        <option value="">All Clients</option>
+                        {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                    </select>
+                )}
+                <select
+                    value={filters.election_id}
+                    onChange={e => handleFilterChange('election_id', e.target.value)}
+                    className="w-full text-xs font-bold bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand/50 text-gray-700 dark:text-gray-200"
+                >
+                    <option value="">All Elections</option>
+                    {visibleElections.map(el => <option key={el.id} value={el.id}>{el.name}</option>)}
+                </select>
+                <select
+                    value={filters.state_id}
+                    onChange={e => handleFilterChange('state_id', e.target.value)}
+                    disabled={!filters.election_id}
+                    className="w-full text-xs font-bold bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand/50 text-gray-700 dark:text-gray-200 disabled:opacity-50"
+                >
+                    <option value="">{filters.election_id ? 'All States' : 'Pick an election first'}</option>
+                    {states.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+                <select
+                    value={filters.lga_id}
+                    onChange={e => handleFilterChange('lga_id', e.target.value)}
+                    disabled={!filters.state_id}
+                    className="w-full text-xs font-bold bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand/50 text-gray-700 dark:text-gray-200 disabled:opacity-50"
+                >
+                    <option value="">{filters.state_id ? 'All LGAs' : 'Select State First'}</option>
+                    {lgas.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+                </select>
+            </div>
 
             <div className="flex items-center justify-between">
                 <h3 className="font-bold flex items-center space-x-2 text-gray-900 dark:text-white">
@@ -177,6 +277,9 @@ const VerificationScreen = () => {
                         <div className="flex items-center space-x-2 text-[11px] text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-900 p-2 rounded-lg">
                             <MapPin className="w-3 h-3 text-brand" />
                             <span>PU Code: {current.pu_code} (Verified Geofence)</span>
+                            {current.election_code && (
+                                <span className="ml-auto text-[8px] font-black bg-brand/10 text-brand px-2 py-0.5 rounded-full uppercase tracking-widest">{current.election_code}</span>
+                            )}
                         </div>
                         <div className="flex items-center space-x-2 text-[11px] text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 p-2 rounded-lg border border-amber-100 dark:border-amber-900/30">
                             <ShieldAlert className="w-3 h-3" />
