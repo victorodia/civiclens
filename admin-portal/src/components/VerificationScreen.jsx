@@ -98,6 +98,10 @@ const VerificationScreen = () => {
     };
 
     const current = items[activeIndex];
+    // AI confidence is stored as a 0–1 fraction (or null when OCR did not run)
+    const confidencePct = current && current.ai_confidence != null
+        ? Math.round(current.ai_confidence * 100)
+        : null;
 
     if (isLoading) return (
         <div className="flex items-center justify-center p-20">
@@ -220,7 +224,7 @@ const VerificationScreen = () => {
 
                     <div className="absolute top-4 left-4 bg-brand text-white text-[8px] font-black px-2 py-1 rounded flex items-center space-x-1 shadow-lg">
                         <Cpu className="w-2 h-2" />
-                        <span>AI OCR ACTIVE ({Math.round(current.ai_confidence)}%)</span>
+                        <span>AI OCR ACTIVE {confidencePct != null ? `(${confidencePct}%)` : '(NO OCR)'}</span>
                     </div>
 
                     <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
@@ -236,7 +240,7 @@ const VerificationScreen = () => {
                         animate={{ opacity: 1, scale: 1 }}
                         className="absolute bottom-4 right-4 bg-brand/90 text-white text-[8px] font-black px-2 py-1 rounded-full flex items-center space-x-1 shadow-lg"
                     >
-                        <span>Confidence: {current.ai_confidence}%</span>
+                        <span>Confidence: {confidencePct != null ? `${confidencePct}%` : 'N/A'}</span>
                     </motion.div>
                 </div>
 
