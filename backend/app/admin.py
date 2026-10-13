@@ -350,6 +350,7 @@ async def get_pus(ward_id: str, db: AsyncSession = Depends(get_db), user: User =
 
 class RevokeSchema(BaseModel):
     admin_password: str
+    totp_code: Optional[str] = None  # Required only when the caller has 2FA enabled
 
 @router.delete("/agents/{agent_id}")
 async def revoke_agent(agent_id: str, payload: RevokeSchema, db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("revoke_agents"))):
@@ -540,6 +541,22 @@ async def factory_reset_system(payload: RevokeSchema, db: AsyncSession = Depends
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Factory Reset Aborted: Incorrect administrative security key."
         )
+
+    # 1b. MFA Challenge — required when the caller has 2FA enabled. The client
+    #     sends the password first; if this challenge fires it prompts for the
+    #     TOTP code and retries with both fields.
+    if user.is_2fa_enabled:
+        if not payload.totp_code:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="2FA_CODE_REQUIRED"
+            )
+        totp = pyotp.TOTP(user.totp_secret)
+        if not totp.verify(payload.totp_code, valid_window=1):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired 2FA code."
+            )
 
     # 2. Sequential Purgation (Nuclear Option) — strict child-before-parent
     #    order: every table holding an FK into results/users/elections must

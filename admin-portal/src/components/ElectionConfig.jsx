@@ -67,12 +67,32 @@ const ElectionConfig = () => {
 
         setIsSaving(true);
         try {
-            const res = await fetch('/admin/factory-reset', {
+            let res = await fetch('/admin/factory-reset', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ admin_password: password })
             });
-            const data = await res.json();
+            let data = await res.json().catch(() => ({}));
+
+            // Step 2 — if the account has 2FA enabled, the backend challenges
+            // for a TOTP code; prompt and retry with both credentials.
+            if (res.status === 401 && data.detail === '2FA_CODE_REQUIRED') {
+                const code = await showDialog({
+                    title: "Two-Factor Authentication",
+                    message: "This account has 2FA enabled. Enter the 6-digit code from your authenticator app to authorize the factory reset:"
+                });
+                if (!code) {
+                    showNotification('Factory reset cancelled.', 'error');
+                    return;
+                }
+                res = await fetch('/admin/factory-reset', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ admin_password: password, totp_code: code.trim() })
+                });
+                data = await res.json().catch(() => ({}));
+            }
+
             if (res.ok) {
                 showNotification('SYSTEM WIPED. All elections, institutions, agents, results and evidence have been deleted.', 'success');
                 fetchConfig(); // Refresh state
