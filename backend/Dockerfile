@@ -14,4 +14,6 @@ COPY . .
 # Run with Gunicorn using Uvicorn workers.
 # 2 workers: the VM has ~956MB RAM and 4 workers gets workers OOM-killed
 # under load ( nationwide monitor map, builds); 2 async workers suffice.
-CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-w", "2", "-b", "0.0.0.0:8001", "app.main:app"]
+# --timeout 330: whole-country election-scope saves rewrite ~177k rows and
+# legitimately exceed gunicorn's 30s default worker timeout.
+CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-w", "2", "--timeout", "330", "-b", "0.0.0.0:8001", "app.main:app"]
