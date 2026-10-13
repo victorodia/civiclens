@@ -274,6 +274,37 @@ const AgentManagement = () => {
         }
     };
 
+    const handleReactivate = async (agentId, agentEmail) => {
+        const password = await showDialog({
+            title: "Reactivate Agent",
+            message: "This restores access for a revoked agent. A NEW device signing key will be generated and they must set a new password at login. Their results and evidence are untouched. Enter Admin Security Key to confirm:"
+        });
+
+        if (!password) return;
+        setIsRevoking(true);
+
+        try {
+            const res = await fetch(`/admin/agents/${agentId}/reactivate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ admin_password: password })
+            });
+
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || "Reactivation failed");
+
+            // Agent becomes active again, pending password reset
+            setAgents(agents.map(a => a.id === agentId ? { ...a, status: 'Pending Reset' } : a));
+            // Show the new signing key once, same panel as provisioning
+            setProvisionedCreds({ password: null, signingKey: data.signing_key, email: agentEmail });
+            showNotification("Agent reactivated — distribute the new signing key shown below.", "success");
+        } catch (err) {
+            showNotification("Reactivation Error: " + err.message, "error");
+        } finally {
+            setIsRevoking(false);
+        }
+    };
+
     if (isLoading) {
         return (
             <div className="flex flex-col items-center justify-center p-20 space-y-4">
@@ -511,13 +542,23 @@ const AgentManagement = () => {
                                 </div>
                             </div>
                             <div className="flex space-x-1">
-                                <button
-                                    onClick={() => handleRevoke(agent.id)}
-                                    className="p-2 text-gray-400 hover:text-amber-500 transition-colors"
-                                    title="Revoke Access (deactivate — results & evidence kept)"
-                                >
-                                    <Shield className="w-4 h-4" />
-                                </button>
+                                {agent.status === 'Revoked' ? (
+                                    <button
+                                        onClick={() => handleReactivate(agent.id, agent.email)}
+                                        className="p-2 text-gray-400 hover:text-green-500 transition-colors"
+                                        title="Reactivate Agent (fresh signing key, password reset — history kept)"
+                                    >
+                                        <CheckCircle className="w-4 h-4" />
+                                    </button>
+                                ) : (
+                                    <button
+                                        onClick={() => handleRevoke(agent.id)}
+                                        className="p-2 text-gray-400 hover:text-amber-500 transition-colors"
+                                        title="Revoke Access (deactivate — results & evidence kept)"
+                                    >
+                                        <Shield className="w-4 h-4" />
+                                    </button>
+                                )}
                                 <button
                                     onClick={() => handleRotateKey(agent.email)}
                                     className="p-2 text-gray-400 hover:text-amber-500 transition-colors"

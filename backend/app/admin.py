@@ -470,6 +470,58 @@ async def purge_agent(agent_id: str, payload: RevokeSchema, db: AsyncSession = D
         "message": f"Agent {agent.email} and all their evidence permanently deleted ({n_results} results, {n_files} files)."
     }
 
+
+@router.post("/agents/{agent_id}/reactivate")
+async def reactivate_agent(agent_id: str, payload: RevokeSchema, db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("revoke_agents"))):
+    """
+    REACTIVATE: restores a revoked (deactivated) agent. A fresh device signing
+    key is issued (the old one was destroyed at revocation), the device
+    fingerprint is cleared so the phone re-binds, and a password reset is
+    forced on next login — same security posture as brand-new provisioning.
+    All prior results, check-ins and evidence remain untouched.
+    Requires administrative re-authentication.
+    """
+    # 1. Verify Administrative Re-authentication.
+    if not verify_password(payload.admin_password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Administrative re-authentication failed. Incorrect security key."
+        )
+
+    # 2. Target Identification
+    agent_res = await db.execute(select(User).where(User.id == agent_id))
+    agent = agent_res.scalars().first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent record not found.")
+    if agent.role != "agent":
+        raise HTTPException(status_code=403, detail="Only field agent accounts can be reactivated via this pipeline.")
+
+    if agent.is_active:
+        return {"status": "already_active", "message": f"Agent {agent.email} is already active."}
+
+    # 3. Restore access with fresh credentials material
+    new_key = secrets.token_urlsafe(32)
+    agent.is_active = True
+    agent.device_signing_key = new_key
+    agent.device_fingerprint = None  # Phone must re-bind on next login
+    agent.requires_password_reset = True  # Password may have been exposed during the incident
+
+    await log_audit(
+        db,
+        actor_id=str(user.id),
+        action="AGENT_REACTIVATION",
+        target_id=agent_id,
+        details=f"Access restored for agent: {agent.email} (fresh signing key issued, password reset forced; history preserved)."
+    )
+    await db.commit()
+
+    return {
+        "status": "reactivated",
+        "email": agent.email,
+        "signing_key": new_key,
+        "message": f"Agent {agent.email} reactivated. Distribute the new signing key; they will set a new password at login."
+    }
+
 @router.post("/factory-reset")
 async def factory_reset_system(payload: RevokeSchema, db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("trigger_factory_reset"))):
     """
