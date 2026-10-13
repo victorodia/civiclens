@@ -414,31 +414,46 @@ async def factory_reset_system(payload: RevokeSchema, db: AsyncSession = Depends
             detail="Factory Reset Aborted: Incorrect administrative security key."
         )
 
-    # 2. Sequential Purgation (Nuclear Option)
-    from sqlalchemy import text
-    from .security import log_audit, get_current_user, RequirePermission
-    
+    # 2. Sequential Purgation (Nuclear Option) — strict child-before-parent
+    #    order: every table holding an FK into results/users must be purged
+    #    first, otherwise the deletes abort on constraint violations (this
+    #    was the original bug: deleting agents while checkins/pings/
+    #    assignments still referenced them -> 500 on every reset).
+
     # Audit before destruction
     await log_audit(
-        db, 
+        db,
         actor_id=str(user.id),
-        action="FACTORY_RESET", 
+        action="FACTORY_RESET",
         details="Nuclear purgation of all results and agent accounts initiated."
     )
-    
+
     # Force purge of results first
     # Using raw SQL to bypass any potential ORM/Cascade edge cases in this nuclear operation
+    await db.execute(text("DELETE FROM agent_location_pings"))
+    await db.execute(text("DELETE FROM agent_checkins"))
+    await db.execute(text("DELETE FROM agent_assignments"))
     await db.execute(text("DELETE FROM results"))
-    
+
+    # Evidence media on disk (photos/videos) — orphaned files serve nobody.
+    import os as _os, glob as _glob
+    _upload_dir = _os.path.join(_os.getcwd(), "app", "static", "uploads")
+    if _os.path.isdir(_upload_dir):
+        for _f in _glob.glob(_os.path.join(_upload_dir, "*")):
+            try:
+                _os.remove(_f)
+            except OSError:
+                pass
+
     # Purge all agents (keeping only admins)
     await db.execute(text("DELETE FROM users WHERE role = 'agent'"))
-    
+
     await db.commit()
     print("[SECURITY] Factory Reset Complete: System Purgated.")
 
     return {
         "status": "success",
-        "message": "System has been restored to factory state. All results and agent profiles have been purged."
+        "message": "System has been restored to factory state. All results, evidence files and agent profiles have been purged."
     }
 
 @router.get("/workforce-status")
