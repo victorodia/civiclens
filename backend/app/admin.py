@@ -1326,6 +1326,8 @@ _monitor_cache = {"at": 0.0, "payload": None, "by_election": {}}
 @router.get("/monitor/map")
 async def get_monitor_map(
     election_id: Optional[str] = None,
+    state_id: Optional[str] = None,
+    lga_id: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(RequirePermission("view_results")),
 ):
@@ -1334,9 +1336,11 @@ async def get_monitor_map(
     (individual marker) plus LGA-level grey bubbles for PUs with no agent
     yet (plotting 170k+ points would melt browsers).
 
-    Statuses: assigned (blue, agent not on site), on_site (green, verified
-    entry and latest fix inside the fence), out_of_fence (orange, latest
-    fix outside the perimeter), submitted (purple, result collated).
+    Filter hierarchy: client (implicit via tenancy/election ownership) ->
+    election -> state -> LGA. Statuses: assigned (blue, agent not on site),
+    on_site (green, verified entry and latest fix inside the fence),
+    out_of_fence (orange, latest fix outside the perimeter), submitted
+    (purple, result collated).
     """
     import time as _time
     from sqlalchemy import text as _text
@@ -1352,16 +1356,20 @@ async def get_monitor_map(
                             detail="Select an election to view its map.")
 
     now = _time.time()
+    # Cache key includes the geo focus so filtered views never get a
+    # nationwide cached payload (or vice versa).
+    cache_key = f"{election_id or ''}|{state_id or ''}|{lga_id or ''}"
     if election_id:
-        cached = _monitor_cache["by_election"].get(election_id)
+        cached = _monitor_cache["by_election"].get(cache_key)
         if cached and now - cached["at"] < 30:
             return cached["payload"]
-    elif _monitor_cache["payload"] and now - _monitor_cache["at"] < 30:
+    elif not (state_id or lga_id) and _monitor_cache["payload"] and now - _monitor_cache["at"] < 30:
         return _monitor_cache["payload"]
 
     if election_id:
         # ── Election-scoped view: only PUs in this election's scope, agents
-        # accredited for this election, results and sessions of this race. ──
+        # accredited for this election, results and sessions of this race.
+        # Optional state/LGA focus narrows within the scope. ──
         agent_rows = (await db.execute(_text("""
             SELECT pu.pu_code, pu.name,
                    pu.expected_latitude::float AS lat, pu.expected_longitude::float AS lng,
@@ -1371,6 +1379,9 @@ async def get_monitor_map(
                    lp.outside_geofence AS latest_outside
             FROM election_polling_units sc
             JOIN polling_units pu ON pu.id = sc.pu_id
+            JOIN wards w ON pu.ward_id = w.id
+            JOIN lgas l ON w.lga_id = l.id
+            JOIN states s ON l.state_id = s.id
             JOIN agent_assignments a ON a.pu_id = pu.id AND a.election_id = sc.election_id
             JOIN users u ON u.id = a.agent_id
             LEFT JOIN results r ON r.pu_id = pu.id AND r.election_id = sc.election_id
@@ -1385,7 +1396,9 @@ async def get_monitor_map(
                 ORDER BY checked_in_at DESC LIMIT 1
             ) ci ON true
             WHERE sc.election_id = :eid AND pu.expected_latitude IS NOT NULL
-        """), {"eid": election_id})).all()
+              AND (CAST(:sid AS varchar) IS NULL OR s.id = :sid)
+              AND (CAST(:lid AS varchar) IS NULL OR l.id = :lid)
+        """), {"eid": election_id, "sid": state_id, "lid": lga_id})).all()
 
         markers = []
         counters = {"assigned": 0, "on_site": 0, "out_of_fence": 0, "submitted": 0}
@@ -1415,8 +1428,10 @@ async def get_monitor_map(
             LEFT JOIN agent_assignments a
               ON a.pu_id = pu.id AND a.election_id = sc.election_id
             WHERE sc.election_id = :eid AND a.id IS NULL AND pu.expected_latitude IS NOT NULL
+              AND (CAST(:sid AS varchar) IS NULL OR s.id = :sid)
+              AND (CAST(:lid AS varchar) IS NULL OR l.id = :lid)
             GROUP BY s.name, l.name
-        """), {"eid": election_id})).all()
+        """), {"eid": election_id, "sid": state_id, "lid": lga_id})).all()
         unassigned_clusters = [{"state": s, "lga": l, "count": n, "lat": lat, "lng": lng}
                                for s, l, n, lat, lng in cluster_rows]
         counters["unassigned"] = sum(c["count"] for c in unassigned_clusters)
@@ -1424,8 +1439,13 @@ async def get_monitor_map(
         no_coords = (await db.execute(_text(
             "SELECT count(*) FROM election_polling_units sc "
             "JOIN polling_units pu ON pu.id = sc.pu_id "
-            "WHERE sc.election_id = :eid AND pu.expected_latitude IS NULL"),
-            {"eid": election_id})).scalar()
+            "JOIN wards w ON pu.ward_id = w.id "
+            "JOIN lgas l ON w.lga_id = l.id "
+            "JOIN states s ON l.state_id = s.id "
+            "WHERE sc.election_id = :eid AND pu.expected_latitude IS NULL "
+            "AND (CAST(:sid AS varchar) IS NULL OR s.id = :sid) "
+            "AND (CAST(:lid AS varchar) IS NULL OR l.id = :lid)"),
+            {"eid": election_id, "sid": state_id, "lid": lga_id})).scalar()
 
         payload = {
             "generated_at": now,
@@ -1434,10 +1454,11 @@ async def get_monitor_map(
             "markers": markers,
             "unassigned_clusters": unassigned_clusters,
         }
-        _monitor_cache["by_election"][election_id] = {"at": now, "payload": payload}
+        _monitor_cache["by_election"][cache_key] = {"at": now, "payload": payload}
         return payload
 
-    # ── Unscoped (legacy) view: whole registry as before. ──
+    # ── Unscoped (legacy) view: whole registry as before, with optional
+    # state/LGA focus for platform admins. ──
     # Agent-carrying PUs with live status
     agent_rows = (await db.execute(_text("""
         SELECT pu.pu_code, pu.name,
@@ -1446,6 +1467,9 @@ async def get_monitor_map(
                (r.id IS NOT NULL) AS submitted,
                lp.outside_geofence AS latest_outside
         FROM polling_units pu
+        JOIN wards w ON pu.ward_id = w.id
+        JOIN lgas l ON w.lga_id = l.id
+        JOIN states s ON l.state_id = s.id
         JOIN users u ON u.assigned_pu_id = pu.id AND u.role = 'agent'
         LEFT JOIN results r ON r.pu_id = pu.id
         LEFT JOIN LATERAL (
@@ -1453,7 +1477,9 @@ async def get_monitor_map(
             WHERE p.agent_id = u.id ORDER BY recorded_at DESC LIMIT 1
         ) lp ON true
         WHERE pu.expected_latitude IS NOT NULL
-    """))).all()
+          AND (CAST(:sid AS varchar) IS NULL OR s.id = :sid)
+          AND (CAST(:lid AS varchar) IS NULL OR l.id = :lid)
+    """), {"sid": state_id, "lid": lga_id})).all()
 
     markers = []
     counters = {"assigned": 0, "on_site": 0, "out_of_fence": 0, "submitted": 0}
@@ -1482,8 +1508,10 @@ async def get_monitor_map(
         JOIN states s ON l.state_id = s.id
         LEFT JOIN users u ON u.assigned_pu_id = pu.id AND u.role = 'agent'
         WHERE u.id IS NULL AND pu.expected_latitude IS NOT NULL
+          AND (CAST(:sid AS varchar) IS NULL OR s.id = :sid)
+          AND (CAST(:lid AS varchar) IS NULL OR l.id = :lid)
         GROUP BY s.name, l.name
-    """))).all()
+    """), {"sid": state_id, "lid": lga_id})).all()
     unassigned_clusters = [{"state": s, "lga": l, "count": n, "lat": lat, "lng": lng}
                            for s, l, n, lat, lng in cluster_rows]
     counters["unassigned"] = sum(c["count"] for c in unassigned_clusters)
@@ -1497,6 +1525,8 @@ async def get_monitor_map(
         "markers": markers,
         "unassigned_clusters": unassigned_clusters,
     }
-    _monitor_cache["at"] = now
-    _monitor_cache["payload"] = payload
+    # Only the unfiltered nationwide view may populate the shared cache slot.
+    if not (state_id or lga_id):
+        _monitor_cache["at"] = now
+        _monitor_cache["payload"] = payload
     return payload
