@@ -219,7 +219,7 @@ const AgentManagement = () => {
     const handleRevoke = async (agentId) => {
         const password = await showDialog({
             title: "Revoke Agent Access",
-            message: "This action is irreversible. The personnel record will be scrubbed from the registry. Enter Admin Security Key to confirm:"
+            message: "This DEACTIVATES the agent. They can no longer log in or submit anything, but their results, check-ins and uploaded evidence stay in the system. Enter Admin Security Key to confirm:"
         });
 
         if (!password) return;
@@ -235,11 +235,40 @@ const AgentManagement = () => {
             const data = await res.json();
             if (!res.ok) throw new Error(data.detail || "Revocation failed");
 
-            // Update local state
-            setAgents(agents.filter(a => a.id !== agentId));
-            showNotification("Agent privileges revoked successfully. Personnel record purged.", "success");
+            // Keep the agent in the list, mark as Revoked
+            setAgents(agents.map(a => a.id === agentId ? { ...a, status: 'Revoked' } : a));
+            showNotification("Access revoked — the agent can no longer log in. Results and evidence preserved.", "success");
         } catch (err) {
             showNotification("Revocation Error: " + err.message, "error");
+        } finally {
+            setIsRevoking(false);
+        }
+    };
+
+    const handlePurge = async (agentId) => {
+        const password = await showDialog({
+            title: "Delete Agent Completely",
+            message: "This PERMANENTLY erases the agent AND everything they ever submitted: results, check-ins, GPS pings and ALL uploaded evidence files. This cannot be undone. Enter Admin Security Key to confirm:"
+        });
+
+        if (!password) return;
+        setIsRevoking(true);
+
+        try {
+            const res = await fetch(`/admin/agents/${agentId}/purge`, {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ admin_password: password })
+            });
+
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || "Purge failed");
+
+            // Agent is gone from the registry entirely
+            setAgents(agents.filter(a => a.id !== agentId));
+            showNotification(`Agent permanently deleted. ${data.message || "All evidence erased."}`, "success");
+        } catch (err) {
+            showNotification("Purge Error: " + err.message, "error");
         } finally {
             setIsRevoking(false);
         }
@@ -482,7 +511,13 @@ const AgentManagement = () => {
                                 </div>
                             </div>
                             <div className="flex space-x-1">
-                                <button className="p-2 text-gray-400 hover:text-brand transition-colors"><Shield className="w-4 h-4" /></button>
+                                <button
+                                    onClick={() => handleRevoke(agent.id)}
+                                    className="p-2 text-gray-400 hover:text-amber-500 transition-colors"
+                                    title="Revoke Access (deactivate — results & evidence kept)"
+                                >
+                                    <Shield className="w-4 h-4" />
+                                </button>
                                 <button
                                     onClick={() => handleRotateKey(agent.email)}
                                     className="p-2 text-gray-400 hover:text-amber-500 transition-colors"
@@ -491,9 +526,9 @@ const AgentManagement = () => {
                                     <RefreshCw className="w-4 h-4" />
                                 </button>
                                 <button
-                                    onClick={() => handleRevoke(agent.id)}
+                                    onClick={() => handlePurge(agent.id)}
                                     className="p-2 text-gray-400 hover:text-red-500 transition-colors"
-                                    title="Revoke Access"
+                                    title="Delete Completely (destroys results & evidence)"
                                 >
                                     <Trash2 className="w-4 h-4" />
                                 </button>

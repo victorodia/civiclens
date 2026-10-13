@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional
 from pydantic import BaseModel
@@ -272,7 +272,8 @@ async def get_all_agents(db: AsyncSession = Depends(get_db), user: User = Depend
             "client_id": agent.client_id,
             "client_name": clients.get(agent.client_id),
             "assignments": assigns.get(agent.id, []),
-            "status": "Pending Reset" if agent.requires_password_reset else "Active",
+            "status": ("Revoked" if not agent.is_active
+                       else ("Pending Reset" if agent.requires_password_reset else "Active")),
             "device": "Authorized" if agent.device_fingerprint else "Pending"
         }
         for agent in agents
@@ -353,12 +354,15 @@ class RevokeSchema(BaseModel):
 @router.delete("/agents/{agent_id}")
 async def revoke_agent(agent_id: str, payload: RevokeSchema, db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("revoke_agents"))):
     """
-    Secure Revocation: Requires administrative re-authentication.
-    Purges an agent from the system, effectively killing their access.
+    OPTION 1 — REVOKE (deactivate): kills the agent's access immediately
+    (login rejected, device key and fingerprint destroyed) but PRESERVES
+    their submitted results, evidence files, sessions and audit trail.
+    Use for compromised devices, dismissed personnel, or end-of-contract.
+    Requires administrative re-authentication.
     """
-    from .security import verify_password, get_current_user, RequirePermission
+    from .security import verify_password
     from .models import User
-    
+
     # 1. Verify Administrative Re-authentication against the authenticated caller.
     if not verify_password(payload.admin_password, user.hashed_password):
         raise HTTPException(
@@ -367,7 +371,6 @@ async def revoke_agent(agent_id: str, payload: RevokeSchema, db: AsyncSession = 
         )
 
     # 2. Target Identification
-    from sqlalchemy import delete
     agent_res = await db.execute(select(User).where(User.id == agent_id))
     agent = agent_res.scalars().first()
 
@@ -377,24 +380,94 @@ async def revoke_agent(agent_id: str, payload: RevokeSchema, db: AsyncSession = 
     if agent.role != "agent":
         raise HTTPException(status_code=403, detail="Only field agent accounts can be revoked via this pipeline.")
 
-    # 3. Purge & Audit
-    from .security import log_audit, get_current_user, RequirePermission
-    
-    # Audit trail for personnel decommissioning
-    await log_audit(
-        db, 
-        actor_id=str(user.id),
-        action="AGENT_REVOCATION", 
-        target_id=agent_id,
-        details=f"Access permanently revoked for agent: {agent.email}"
-    )
+    if not agent.is_active:
+        return {"status": "already_revoked", "message": f"Agent {agent.email} is already deactivated."}
 
-    await db.execute(delete(User).where(User.id == agent_id))
+    # 3. Deactivate & Audit — the account row survives so results/evidence
+    #    keep their provenance (results.agent_id FK stays valid).
+    agent.is_active = False
+    agent.device_signing_key = None
+    agent.device_fingerprint = None
+    await log_audit(
+        db,
+        actor_id=str(user.id),
+        action="AGENT_REVOCATION",
+        target_id=agent_id,
+        details=f"Access revoked for agent: {agent.email} (account deactivated; results and evidence preserved)."
+    )
     await db.commit()
 
     return {
-        "status": "success",
-        "message": f"Agent {agent.email} has been successfully revoked and purged from the registry."
+        "status": "deactivated",
+        "message": f"Agent {agent.email} access revoked. Their results and evidence remain in the system."
+    }
+
+
+@router.delete("/agents/{agent_id}/purge")
+async def purge_agent(agent_id: str, payload: RevokeSchema, db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("revoke_agents"))):
+    """
+    OPTION 2 — PURGE (complete erasure): deletes the agent account AND every
+    result, check-in, GPS ping, assignment and evidence FILE they produced.
+    Irreversible. Use only for never-used accounts or where legally required.
+    Requires administrative re-authentication.
+    """
+    from .security import verify_password
+
+    # 1. Verify Administrative Re-authentication.
+    if not verify_password(payload.admin_password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Administrative re-authentication failed. Incorrect security key."
+        )
+
+    # 2. Target Identification
+    agent_res = await db.execute(select(User).where(User.id == agent_id))
+    agent = agent_res.scalars().first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent record not found.")
+    if agent.role != "agent":
+        raise HTTPException(status_code=403, detail="Only field agent accounts can be purged via this pipeline.")
+
+    # 3. Collect evidence filenames BEFORE deleting result rows
+    rows = (await db.execute(
+        text("SELECT image_url FROM results WHERE agent_id = :a AND image_url IS NOT NULL"),
+        {"a": agent_id})).all()
+    filenames = {r[0].rsplit("/", 1)[-1] for r in rows if r[0]}
+
+    # 4. Child-before-parent purge (FK-safe order)
+    await db.execute(text("DELETE FROM agent_location_pings WHERE agent_id = :a"), {"a": agent_id})
+    await db.execute(text("DELETE FROM agent_checkins WHERE agent_id = :a"), {"a": agent_id})
+    await db.execute(text("DELETE FROM agent_assignments WHERE agent_id = :a"), {"a": agent_id})
+    res = await db.execute(text("DELETE FROM results WHERE agent_id = :a"), {"a": agent_id})
+    n_results = getattr(res, "rowcount", -1)
+
+    # 5. Evidence files off disk
+    import os as _os
+    _upload_dir = _os.path.join(_os.getcwd(), "app", "static", "uploads")
+    n_files = 0
+    for fn in filenames:
+        p = _os.path.join(_upload_dir, fn)
+        if _os.path.isfile(p):
+            try:
+                _os.remove(p)
+                n_files += 1
+            except OSError:
+                pass
+
+    # 6. The account itself + audit
+    await db.execute(text("DELETE FROM users WHERE id = :a"), {"a": agent_id})
+    await log_audit(
+        db,
+        actor_id=str(user.id),
+        action="AGENT_PURGE",
+        target_id=agent_id,
+        details=f"Agent {agent.email} completely purged: {n_results} result(s), {n_files} evidence file(s) destroyed."
+    )
+    await db.commit()
+
+    return {
+        "status": "purged",
+        "message": f"Agent {agent.email} and all their evidence permanently deleted ({n_results} results, {n_files} files)."
     }
 
 @router.post("/factory-reset")
