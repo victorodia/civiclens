@@ -23,6 +23,14 @@ function ScopeEditor({ election, onDone }) {
     const [checkedLgas, setCheckedLgas] = useState({});
     const [openStates, setOpenStates] = useState({});
     const [saving, setSaving] = useState(false);
+    const [elapsed, setElapsed] = useState(0);
+
+    // Elapsed-seconds ticker while a scope save is in flight
+    useEffect(() => {
+        if (!saving) { setElapsed(0); return; }
+        const t = setInterval(() => setElapsed(e => e + 1), 1000);
+        return () => clearInterval(t);
+    }, [saving]);
 
     useEffect(() => {
         (async () => {
@@ -86,6 +94,12 @@ function ScopeEditor({ election, onDone }) {
         }
     };
 
+    const phaseText = () => {
+        if (elapsed < 8) return 'Resolving polling units…';
+        if (elapsed < 60) return 'Rewriting election scope — the biggest step…';
+        return 'Finalizing — almost done…';
+    };
+
     return (
         <div className="mt-3 border border-gray-200 dark:border-gray-700 rounded-xl p-3 bg-gray-50 dark:bg-gray-900/40">
             <div className="flex items-center justify-between mb-2">
@@ -97,8 +111,27 @@ function ScopeEditor({ election, onDone }) {
                     <Save className="w-3 h-3" /><span>{saving ? 'Saving…' : 'Save scope'}</span>
                 </button>
             </div>
+            {saving && (
+                <div className="mb-3 space-y-1.5" aria-live="polite">
+                    <div className="h-1.5 rounded-full bg-gray-200 dark:bg-gray-700 overflow-hidden relative">
+                        <motion.div
+                            className="absolute top-0 bottom-0 w-1/3 rounded-full bg-brand"
+                            animate={{ x: ['-110%', '320%'] }}
+                            transition={{ repeat: Infinity, duration: 1.4, ease: 'easeInOut' }}
+                        />
+                    </div>
+                    <p className="text-[10px] text-gray-500 font-bold">
+                        {phaseText()} <span className="text-gray-400">({elapsed}s)</span> — please keep this page open.
+                    </p>
+                </div>
+            )}
             {wholeStates.length > 0 && (
                 <p className="text-[10px] text-gray-500 mb-2">Whole states: {wholeStates.join(', ')}</p>
+            )}
+            {!saving && allChecked() > 100 && (
+                <p className="text-[10px] text-amber-600 dark:text-amber-400 font-bold mb-2">
+                    Large scope — saving rewrites tens of thousands of records and can take up to a minute. A progress bar will show while it works.
+                </p>
             )}
             <div className="max-h-64 overflow-y-auto space-y-1 pr-1">
                 {states.map(st => (

@@ -382,7 +382,12 @@ async def set_election_scope(
     if not n_pus:
         raise HTTPException(422, "The selected states/LGAs contain no polling units.")
 
-    # Replace scope (single round-trip via DELETE + INSERT-from-SELECT)
+    # Replace scope (single round-trip via DELETE + INSERT-from-SELECT).
+    # Bulk-load fast path: the inserted pu_ids are selected FROM polling_units
+    # itself, so referential integrity is guaranteed by construction — skip
+    # the per-row FK triggers. This cuts a whole-country save (177k rows)
+    # from ~113s to a few seconds. Restored to 'origin' before the audit row.
+    await db.execute(text("SET LOCAL session_replication_role = replica"))
     await db.execute(delete(ElectionPU).where(ElectionPU.election_id == election_id))
     await db.execute(
         insert(ElectionPU).from_select(
@@ -400,6 +405,7 @@ async def set_election_scope(
         .where(AgentAssignment.pu_id.notin_(select(ElectionPU.pu_id)
                                             .where(ElectionPU.election_id == election_id)))
     )
+    await db.execute(text("SET LOCAL session_replication_role = origin"))
     await log_audit(db, actor_id=str(user.id), action="ELECTION_SCOPE",
                     target_id=election.id,
                     details=f"Scope set to {n_pus} PUs "
