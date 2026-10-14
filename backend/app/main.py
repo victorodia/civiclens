@@ -138,6 +138,12 @@ async def get_election_config(db: _AsyncSession = _Depends(_get_db)):
 
 @app.put("/admin/election-config", tags=["Election Config"])
 async def update_election_config(payload: _ElectionConfigSchema, db: _AsyncSession = _Depends(_get_db), user = _Depends(RequirePermission("trigger_factory_reset"))):
+    # Tenancy: this legacy config row is shared platform-wide — one client's
+    # write would change every other client's labels. Platform-only; each
+    # election carries its own party names at creation.
+    if getattr(user, "client_id", None) is not None:
+        from fastapi import HTTPException as _HE
+        raise _HE(status_code=403, detail="Election configuration is restricted to platform administrators.")
     from app.models import ElectionConfig
     from datetime import datetime
     result = await db.execute(sa_select(ElectionConfig).where(ElectionConfig.id == "global"))

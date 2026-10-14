@@ -31,24 +31,31 @@ class TOTPVerifySchema(BaseModel):
 @router.get("/mfa/setup")
 async def setup_mfa(email: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
     """Generates a new TOTP secret and returns a provisioning URI (QR code)."""
-    if email.lower() != user.email.lower() and user.role != "admin":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You may only manage your own MFA enrollment.")
     from .models import User
+    if email.lower() != user.email.lower():
+        if user.role != "admin":
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You may only manage your own MFA enrollment.")
+        # Tenancy: a client admin must never reach another institution's
+        # accounts — or even learn they exist. 404, not 403.
+        if user.client_id is not None:
+            probe = (await db.execute(select(User).where(User.email == email))).scalars().first()
+            if not probe or probe.client_id != user.client_id:
+                raise HTTPException(status_code=404, detail="User not found")
     result = await db.execute(select(User).where(User.email == email))
-    user = result.scalars().first()
-    
-    if not user:
+    target = result.scalars().first()
+
+    if not target:
         raise HTTPException(status_code=404, detail="User not found")
-        
-    if not user.totp_secret:
-        user.totp_secret = pyotp.random_base32()
+
+    if not target.totp_secret:
+        target.totp_secret = pyotp.random_base32()
         await db.commit()
-        
-    totp = pyotp.TOTP(user.totp_secret)
+
+    totp = pyotp.TOTP(target.totp_secret)
     provisioning_uri = totp.provisioning_uri(name=email, issuer_name="CivicLens")
-    
+
     return {
-        "secret": user.totp_secret,
+        "secret": target.totp_secret,
         "provisioning_uri": provisioning_uri
     }
 
@@ -295,6 +302,11 @@ async def rotate_agent_signing_key(payload: RotateKeySchema, db: AsyncSession = 
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found.")
 
+    # Tenancy: a client admin must never reach another institution's agents.
+    # 404, not 403 — don't reveal the agent exists.
+    if user.client_id is not None and agent.client_id != user.client_id:
+        raise HTTPException(status_code=404, detail="Agent not found.")
+
     new_key = secrets.token_urlsafe(32)
     agent.device_signing_key = new_key
 
@@ -420,6 +432,10 @@ async def revoke_agent(agent_id: str, payload: RevokeSchema, db: AsyncSession = 
     if not agent:
         raise HTTPException(status_code=404, detail="Agent record not found.")
 
+    # Tenancy: a client admin must never reach another institution's agents.
+    if user.client_id is not None and agent.client_id != user.client_id:
+        raise HTTPException(status_code=404, detail="Agent record not found.")
+
     if agent.role != "agent":
         raise HTTPException(status_code=403, detail="Only field agent accounts can be revoked via this pipeline.")
 
@@ -467,6 +483,9 @@ async def purge_agent(agent_id: str, payload: RevokeSchema, db: AsyncSession = D
     agent_res = await db.execute(select(User).where(User.id == agent_id))
     agent = agent_res.scalars().first()
     if not agent:
+        raise HTTPException(status_code=404, detail="Agent record not found.")
+    # Tenancy: a client admin must never reach another institution's agents.
+    if user.client_id is not None and agent.client_id != user.client_id:
         raise HTTPException(status_code=404, detail="Agent record not found.")
     if agent.role != "agent":
         raise HTTPException(status_code=403, detail="Only field agent accounts can be purged via this pipeline.")
@@ -536,6 +555,9 @@ async def reactivate_agent(agent_id: str, payload: RevokeSchema, db: AsyncSessio
     agent = agent_res.scalars().first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent record not found.")
+    # Tenancy: a client admin must never reach another institution's agents.
+    if user.client_id is not None and agent.client_id != user.client_id:
+        raise HTTPException(status_code=404, detail="Agent record not found.")
     if agent.role != "agent":
         raise HTTPException(status_code=403, detail="Only field agent accounts can be reactivated via this pipeline.")
 
@@ -576,6 +598,15 @@ async def factory_reset_system(payload: RevokeSchema, db: AsyncSession = Depends
     Requires administrative re-authentication.
     """
     from .security import verify_password
+
+    # 0. Tenancy: the nuclear option is platform-only. A client admin must
+    # never be able to wipe — or even trigger the wipe flow of — other
+    # institutions' data.
+    if user.client_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Factory reset is restricted to platform administrators."
+        )
 
     # 1. Verify Administrative Re-authentication against the authenticated caller.
     if not verify_password(payload.admin_password, user.hashed_password):
@@ -1050,6 +1081,12 @@ async def get_roles(db: AsyncSession = Depends(get_db), user = Depends(RequirePe
 
 @router.post("/system/roles")
 async def create_role(payload: RoleSchema, db: AsyncSession = Depends(get_db), user = Depends(RequirePermission("create_system_users"))):
+    # Tenancy: roles are platform-global definitions; only platform admins
+    # may mutate them.
+    if user.client_id is not None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Role management is restricted to platform administrators.")
+
     role = Role(**payload.dict())
     db.add(role)
     await db.commit()
@@ -1058,6 +1095,12 @@ async def create_role(payload: RoleSchema, db: AsyncSession = Depends(get_db), u
 
 @router.put("/system/roles/{role_id}")
 async def update_role(role_id: str, payload: RoleSchema, db: AsyncSession = Depends(get_db), user = Depends(RequirePermission("change_user_roles"))):
+    # Tenancy: roles are platform-global definitions; only platform admins
+    # may mutate them.
+    if user.client_id is not None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Role management is restricted to platform administrators.")
+
     result = await db.execute(select(Role).filter_by(id=role_id))
     role = result.scalar_one_or_none()
     if not role:
@@ -1069,6 +1112,12 @@ async def update_role(role_id: str, payload: RoleSchema, db: AsyncSession = Depe
 
 @router.delete("/system/roles/{role_id}")
 async def delete_role(role_id: str, db: AsyncSession = Depends(get_db), user = Depends(RequirePermission("delete_system_users"))):
+    # Tenancy: roles are platform-global definitions; only platform admins
+    # may mutate them.
+    if user.client_id is not None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Role management is restricted to platform administrators.")
+
     result = await db.execute(select(Role).filter_by(id=role_id))
     role = result.scalar_one_or_none()
     if not role:
@@ -1091,6 +1140,10 @@ class SystemUserCreate(BaseModel):
     full_name: str
     role: str
     password: str
+    # Platform admins only: bind the new account to an institution. Client
+    # admins cannot set this — the new account is bound to their own client
+    # automatically.
+    client_id: Optional[str] = None
 
 class SystemUserUpdate(BaseModel):
     full_name: Optional[str] = None
@@ -1098,11 +1151,16 @@ class SystemUserUpdate(BaseModel):
     is_active: Optional[bool] = None
 
 @router.get("/system/users")
-async def get_system_users(db: AsyncSession = Depends(get_db), _: User = Depends(RequirePermission("view_system_users"))):
+async def get_system_users(db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("view_system_users"))):
     from sqlalchemy import select
     from .models import User
     # Only return non-agent users
-    res = await db.execute(select(User).where(User.role != "agent"))
+    stmt = select(User).where(User.role != "agent")
+    if user.client_id is not None:
+        # Tenancy: a client admin must not even learn that other institutions'
+        # staff accounts exist.
+        stmt = stmt.where(User.client_id == user.client_id)
+    res = await db.execute(stmt)
     users = res.scalars().all()
     return [
         {"id": u.id, "email": u.email, "full_name": u.full_name, "role": u.role, "is_active": u.is_active}
@@ -1110,56 +1168,70 @@ async def get_system_users(db: AsyncSession = Depends(get_db), _: User = Depends
     ]
 
 @router.post("/system/users")
-async def create_system_user(payload: SystemUserCreate, db: AsyncSession = Depends(get_db), _: User = Depends(RequirePermission("create_system_users"))):
+async def create_system_user(payload: SystemUserCreate, db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("create_system_users"))):
     from .models import User
     from sqlalchemy import select
     from .security import get_password_hash, get_current_user, RequirePermission
-    
+
     # check exists
     res = await db.execute(select(User).where(User.email == payload.email))
     if res.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Email already registered")
-        
+
+    # Tenancy: client admins create staff bound to their own institution;
+    # only platform admins may bind a new user to a specific client (or none).
+    new_client_id = user.client_id if user.client_id is not None else payload.client_id
+
     new_user = User(
         email=payload.email,
         full_name=payload.full_name,
         role=payload.role,
         hashed_password=get_password_hash(payload.password),
         is_active=True,
-        requires_password_reset=True
+        requires_password_reset=True,
+        client_id=new_client_id,
     )
     db.add(new_user)
     await db.commit()
     return {"status": "success", "id": new_user.id}
 
 @router.put("/system/users/{user_id}")
-async def update_system_user(user_id: str, payload: SystemUserUpdate, db: AsyncSession = Depends(get_db), _: User = Depends(RequirePermission("create_system_users"))):
+async def update_system_user(user_id: str, payload: SystemUserUpdate, db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("create_system_users"))):
     from .models import User
     from sqlalchemy import select
     res = await db.execute(select(User).where(User.id == user_id))
-    user = res.scalar_one_or_none()
-    if not user:
+    target = res.scalar_one_or_none()
+    if not target:
         raise HTTPException(status_code=404, detail="User not found")
-        
+
+    # Tenancy: client admins can only touch their own institution's accounts
+    # (and never platform-level accounts). 404, not 403 — don't reveal that
+    # the foreign account exists.
+    if user.client_id is not None and target.client_id != user.client_id:
+        raise HTTPException(status_code=404, detail="User not found")
     if payload.full_name is not None:
-        user.full_name = payload.full_name
+        target.full_name = payload.full_name
     if payload.role is not None:
-        user.role = payload.role
+        target.role = payload.role
     if payload.is_active is not None:
-        user.is_active = payload.is_active
-        
+        target.is_active = payload.is_active
+
     await db.commit()
     return {"status": "success"}
 
 @router.delete("/system/users/{user_id}")
-async def delete_system_user(user_id: str, db: AsyncSession = Depends(get_db), _: User = Depends(RequirePermission("create_system_users"))):
+async def delete_system_user(user_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(RequirePermission("create_system_users"))):
     from .models import User
     from sqlalchemy import select
     res = await db.execute(select(User).where(User.id == user_id))
-    user = res.scalar_one_or_none()
-    if not user:
+    target = res.scalar_one_or_none()
+    if not target:
         raise HTTPException(status_code=404, detail="User not found")
-    await db.delete(user)
+    # Tenancy: same wall as the update endpoint — foreign or platform-level
+    # accounts must not be reachable from a client admin.
+    if user.client_id is not None and target.client_id != user.client_id:
+        raise HTTPException(status_code=404, detail="User not found")
+    await db.delete(target)
     await db.commit()
     return {"status": "success"}
 
