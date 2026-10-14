@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { Vote, Plus, MapPin, Save, ChevronDown, ChevronUp, Trash2 } from 'lucide-react';
+import { Vote, Plus, MapPin, Save, ChevronDown, ChevronUp, Trash2, Play } from 'lucide-react';
 import { useElection } from '../contexts/ElectionContext';
 import { useNotification } from '../contexts/NotificationContext';
 
@@ -396,12 +396,6 @@ const Elections = ({ setActiveView }) => {
                                 <p className="text-[9px] text-brand/80 dark:text-brand font-bold uppercase tracking-widest">🏛 {e.client_name}</p>
                             )}
                         </div>
-                        <select value={e.status} onChange={ev => setStatus(e, ev.target.value)}
-                            className="text-[10px] bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-2 py-1">
-                            <option value="upcoming">Upcoming</option>
-                            <option value="live">Live</option>
-                            <option value="closed">Closed</option>
-                        </select>
                     </div>
 
                     <div className="grid grid-cols-3 gap-2 mt-3 text-center">
@@ -419,11 +413,48 @@ const Elections = ({ setActiveView }) => {
                         </div>
                     </div>
 
-                    <div className="flex space-x-4 mt-3">
+                    {/* Process tracker: create -> scope -> go live, in that order */}
+                    <div className="flex items-center mt-3">
+                        {[
+                            { n: 1, label: 'Created', done: true },
+                            { n: 2, label: 'Scope set', done: (e.pus ?? 0) > 0, active: (e.pus ?? 0) === 0 },
+                            { n: 3, label: 'Live', done: e.status !== 'upcoming', active: (e.pus ?? 0) > 0 && e.status === 'upcoming' },
+                        ].map((s, i) => (
+                            <React.Fragment key={s.n}>
+                                {i > 0 && <span className="flex-1 h-px bg-gray-200 dark:bg-gray-700 mx-2" />}
+                                <span className={`flex items-center space-x-1.5 text-[9px] font-black uppercase tracking-widest whitespace-nowrap ${s.done ? 'text-emerald-600 dark:text-emerald-400' : s.active ? 'text-brand' : 'text-gray-400'}`}>
+                                    <span className={`w-4 h-4 rounded-full flex items-center justify-center text-[8px] ${s.done ? 'bg-emerald-100 dark:bg-emerald-900/40' : s.active ? 'bg-brand/10' : 'bg-gray-100 dark:bg-gray-800'}`}>{s.done ? '✓' : s.n}</span>
+                                    <span>{s.label}</span>
+                                </span>
+                            </React.Fragment>
+                        ))}
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 mt-3">
                         <button className="text-[10px] font-black uppercase tracking-widest text-brand"
                             onClick={() => setScopeFor(scopeFor === e.id ? null : e.id)}>
                             {scopeFor === e.id ? 'Close scope editor' : (e.pus ? 'Edit scope' : 'Set scope')}
                         </button>
+                        {e.status === 'upcoming' && (
+                            <button onClick={() => setStatus(e, 'live')}
+                                disabled={(e.pus ?? 0) === 0}
+                                title={(e.pus ?? 0) === 0 ? 'Set the scope first — an election cannot go live with no polling units' : 'Open this election for result submissions'}
+                                className="flex items-center space-x-1 text-[10px] font-black uppercase tracking-widest text-emerald-600 dark:text-emerald-400 disabled:opacity-40 disabled:cursor-not-allowed">
+                                <Play className="w-3 h-3" /><span>Go live</span>
+                            </button>
+                        )}
+                        {e.status === 'live' && (
+                            <button onClick={() => setStatus(e, 'closed')}
+                                className="text-[10px] font-black uppercase tracking-widest text-amber-600 dark:text-amber-400">
+                                Close election
+                            </button>
+                        )}
+                        {e.status === 'closed' && (
+                            <button onClick={() => setStatus(e, 'upcoming')}
+                                className="text-[10px] font-black uppercase tracking-widest text-gray-500 dark:text-gray-400">
+                                Reopen
+                            </button>
+                        )}
                         <button className="text-[10px] font-black uppercase tracking-widest text-brand flex items-center space-x-1"
                             onClick={() => { setActiveElection(e.id); setActiveView && setActiveView('livemap'); }}>
                             <MapPin className="w-3 h-3" /><span>Live map</span>
@@ -433,6 +464,11 @@ const Elections = ({ setActiveView }) => {
                             <Trash2 className="w-3 h-3" /><span>Delete</span>
                         </button>
                     </div>
+                    {e.status === 'upcoming' && (e.pus ?? 0) === 0 && (
+                        <p className="text-[10px] text-amber-600 dark:text-amber-400 font-bold mt-2">
+                            Next step: set the scope — pick the polling units, save, then Go live.
+                        </p>
+                    )}
 
                     {scopeFor === e.id && <ScopeEditor election={e} onDone={() => { refresh(); setScopeFor(null); }} />}
                 </div>
