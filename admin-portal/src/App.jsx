@@ -164,20 +164,21 @@ function LayoutShell({ children, activeView, setActiveView, onLogout, walletStat
       {/* Navigation */}
       <nav className="fixed bottom-0 left-0 right-0 bg-white/80 dark:bg-gray-900/80 backdrop-blur-lg border-t border-gray-200 dark:border-gray-800 pb-safe z-50">
         <div className="flex justify-around items-center h-16 w-full max-w-5xl mx-auto px-4">
-          { (hasPerm("view_live_telemetry") || hasPerm("view_results")) && <button
-            onClick={() => setActiveView('dashboard')}
-            className={`flex flex-col items-center justify-center w-full h-full transition-colors ${activeView === 'dashboard' ? 'text-brand' : 'text-gray-400'}`}
+          {/* ── SETUP: who hired us -> what we monitor -> who monitors it ── */}
+          { isPlatformAdmin && <button
+            onClick={() => setActiveView('clients')}
+            className={`flex flex-col items-center justify-center w-full h-full transition-colors ${activeView === 'clients' ? 'text-brand' : 'text-gray-400'}`}
           >
-            <LayoutDashboard className="w-5 h-5 mb-1" />
-            <span className="text-[9px] font-black uppercase tracking-widest">Room</span>
+            <Building2 className="w-5 h-5 mb-1" />
+            <span className="text-[9px] font-black uppercase tracking-widest">Clients</span>
           </button> }
 
-          { hasPerm("approve_results") && <button
-            onClick={() => setActiveView('verify')}
-            className={`flex flex-col items-center justify-center w-full h-full transition-colors ${activeView === 'verify' ? 'text-brand' : 'text-gray-400'}`}
+          { hasPerm("view_results") && <button
+            onClick={() => setActiveView('elections')}
+            className={`flex flex-col items-center justify-center w-full h-full transition-colors ${activeView === 'elections' ? 'text-brand' : 'text-gray-400'}`}
           >
-            <ShieldCheck className="w-5 h-5 mb-1" />
-            <span className="text-[9px] font-black uppercase tracking-widest">Verify</span>
+            <Vote className="w-5 h-5 mb-1" />
+            <span className="text-[9px] font-black uppercase tracking-widest">Elections</span>
           </button> }
 
           { hasPerm("view_agents") && <button
@@ -188,12 +189,30 @@ function LayoutShell({ children, activeView, setActiveView, onLogout, walletStat
             <span className="text-[9px] font-black uppercase tracking-widest">Agents</span>
           </button> }
 
+          {/* ── ELECTION DAY: track the field force -> watch results land ── */}
           { hasPerm("view_agents") && <button
             onClick={() => setActiveView('workforce')}
             className={`flex flex-col items-center justify-center w-full h-full transition-colors ${activeView === 'workforce' ? 'text-brand' : 'text-gray-400'}`}
           >
             <Activity className="w-5 h-5 mb-1" />
             <span className="text-[9px] font-black uppercase tracking-widest">Monitor</span>
+          </button> }
+
+          { (hasPerm("view_live_telemetry") || hasPerm("view_results")) && <button
+            onClick={() => setActiveView('dashboard')}
+            className={`flex flex-col items-center justify-center w-full h-full transition-colors ${activeView === 'dashboard' ? 'text-brand' : 'text-gray-400'}`}
+          >
+            <LayoutDashboard className="w-5 h-5 mb-1" />
+            <span className="text-[9px] font-black uppercase tracking-widest">Room</span>
+          </button> }
+
+          {/* ── AFTERMATH: review flagged results -> audit the gaps ── */}
+          { hasPerm("approve_results") && <button
+            onClick={() => setActiveView('verify')}
+            className={`flex flex-col items-center justify-center w-full h-full transition-colors ${activeView === 'verify' ? 'text-brand' : 'text-gray-400'}`}
+          >
+            <ShieldCheck className="w-5 h-5 mb-1" />
+            <span className="text-[9px] font-black uppercase tracking-widest">Verify</span>
           </button> }
 
           { hasPerm("view_results") && <button
@@ -204,22 +223,7 @@ function LayoutShell({ children, activeView, setActiveView, onLogout, walletStat
             <span className="text-[9px] font-black uppercase tracking-widest">Audit</span>
           </button> }
 
-          <button
-            onClick={() => setActiveView('profile')}
-            className={`flex flex-col items-center justify-center w-full h-full transition-colors ${activeView === 'profile' ? 'text-brand' : 'text-gray-400'}`}
-          >
-            <UserCircle className="w-5 h-5 mb-1" />
-            <span className="text-[9px] font-black uppercase tracking-widest">Profile</span>
-          </button>
-
-          { hasPerm("view_results") && <button
-            onClick={() => setActiveView('elections')}
-            className={`flex flex-col items-center justify-center w-full h-full transition-colors ${activeView === 'elections' ? 'text-brand' : 'text-gray-400'}`}
-          >
-            <Vote className="w-5 h-5 mb-1" />
-            <span className="text-[9px] font-black uppercase tracking-widest">Elections</span>
-          </button> }
-
+          {/* ── HOUSEKEEPING: system config -> personal profile ── */}
           { (hasPerm("trigger_factory_reset") || hasPerm("view_system_users")) && <button
             onClick={() => setActiveView('settings')}
             className={`flex flex-col items-center justify-center w-full h-full transition-colors ${activeView === 'settings' ? 'text-brand' : 'text-gray-400'}`}
@@ -228,13 +232,13 @@ function LayoutShell({ children, activeView, setActiveView, onLogout, walletStat
             <span className="text-[9px] font-black uppercase tracking-widest">Config</span>
           </button> }
 
-          { isPlatformAdmin && <button
-            onClick={() => setActiveView('clients')}
-            className={`flex flex-col items-center justify-center w-full h-full transition-colors ${activeView === 'clients' ? 'text-brand' : 'text-gray-400'}`}
+          <button
+            onClick={() => setActiveView('profile')}
+            className={`flex flex-col items-center justify-center w-full h-full transition-colors ${activeView === 'profile' ? 'text-brand' : 'text-gray-400'}`}
           >
-            <Building2 className="w-5 h-5 mb-1" />
-            <span className="text-[9px] font-black uppercase tracking-widest">Clients</span>
-          </button> }
+            <UserCircle className="w-5 h-5 mb-1" />
+            <span className="text-[9px] font-black uppercase tracking-widest">Profile</span>
+          </button>
         </div>
       </nav>
     </div>
