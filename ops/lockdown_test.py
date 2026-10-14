@@ -25,9 +25,11 @@ FP = "MOCKED_PHONE_ID"
 OCCUPIED_PU = "DEL-04-10-011"
 
 
-def sign_payload(pu_code, a, b, c, key):
-    """Same construction as the agent portal: puCode|A|B|C, HMAC-SHA256, base64."""
-    msg = f"{pu_code}|{a}|{b}|{c}".encode()
+def sign_payload(pu_code, ecode, a, b, c, key):
+    """Same construction as the agent portal: puCode|ELECTIONCODE|A|B|C,
+    HMAC-SHA256, base64. The election code is inside the signed string, so a
+    payload minted for one race is invalid for another."""
+    msg = f"{pu_code}|{ecode}|{a}|{b}|{c}".encode()
     return base64.b64encode(hmac.new(key.encode(), msg, hashlib.sha256).digest()).decode()
 
 # 1x1 transparent PNG
@@ -85,6 +87,9 @@ sql(f"INSERT INTO users (id,email,hashed_password,full_name,role,is_active,requi
     # conflict before a single check executes.
     f"ON CONFLICT (id) DO UPDATE SET email=EXCLUDED.email, hashed_password=EXCLUDED.hashed_password, "
     f"is_active=true, requires_password_reset=false;")
+
+ELECTION_ID = None  # sandbox election, created in the positive-admin section
+ECODE = f"ZZ-LK-{_run.upper()}"
 
 try:
     st, r = call("POST", "/auth/login", {"email": ADMIN_EMAIL, "password": ADMIN_PW})
@@ -156,10 +161,30 @@ try:
     st, r = call("GET", "/admin/stats/collation", headers=AH)
     check("stats/collation admin -> 200", st == 200, f"got {st}")
     st, r = call("GET", "/admin/geo/states", headers=AH)
-    check("geo/states admin -> 200", st == 200 and isinstance(r, list) and len(r) > 0,
+    states_ok = st == 200 and isinstance(r, list) and len(r) > 0
+    states_list = r if states_ok else []
+    check("geo/states admin -> 200", states_ok,
           f"got {st} states={len(r) if isinstance(r, list) else 0}")
+
+    # Sandbox election: the submit/check-in security checks below must bind
+    # to a REAL election row (the GENERAL default no longer exists), scoped
+    # to the state holding OCCUPIED_PU, and live — otherwise the flow dies
+    # at election resolution and every downstream gate goes untested.
+    st, r = call("POST", "/admin/elections",
+                 {"name": f"Lockdown Sandbox {_run}", "code": ECODE, "type": "presidential"},
+                 headers=AH)
+    ELECTION_ID = r.get("id")
+    check("sandbox election create -> 201", st == 201 and bool(ELECTION_ID), f"got {st}")
+    st, r = call("PUT", f"/admin/elections/{ELECTION_ID}/status", {"status": "live"}, headers=AH)
+    check("sandbox election go live -> 200", st == 200, f"got {st}")
+    delta = next((s for s in states_list if "delta" in (s.get("name") or "").lower()), None)
+    st, r = call("POST", f"/admin/elections/{ELECTION_ID}/scope",
+                 {"state_ids": [delta["id"]]}, headers=AH)
+    check("sandbox scope (Delta) -> 200", st == 200 and bool(delta), f"got {st}")
+
     st, r = call("POST", "/admin/provision-agents",
-                 {"emails": [AGENT_EMAIL], "polling_unit_id": "cb4aefad-3f6d-581f-aff6-ab2754b9c2be"},
+                 {"emails": [AGENT_EMAIL], "polling_unit_id": "cb4aefad-3f6d-581f-aff6-ab2754b9c2be",
+                  "election_id": ELECTION_ID},
                  headers=AH)
     agent_signing_key = (r.get("provisioned") or {}).get(AGENT_EMAIL, {}).get("signing_key")
     check("provision-agents admin -> 200", st == 200 and bool(agent_signing_key), f"got {st} key={'yes' if agent_signing_key else 'NO'}")
@@ -182,8 +207,9 @@ try:
     GH = {"Authorization": f"Bearer {agent_tok}", "X-Device-Fingerprint": FP}
 
     # Muster-roll gate: a correctly signed submission must still be rejected
-    # before Verify Entry. Fresh temp agent -> is_on_site=False.
-    pre_sig = sign_payload(OCCUPIED_PU, 1, 1, 1, agent_signing_key)
+    # before Verify Entry (legacy payload, no election_id — binds via the
+    # agent's single accreditation). Fresh temp agent -> no check-in session.
+    pre_sig = sign_payload(OCCUPIED_PU, ECODE, 1, 1, 1, agent_signing_key)
     st, r = call("POST", "/results/submit",
                  {"pu_code": OCCUPIED_PU, "agent_email": AGENT_EMAIL, "party_a_votes": 1,
                   "party_b_votes": 1, "party_c_votes": 1, "total_valid": 3,
@@ -217,30 +243,35 @@ try:
                   "party_b_votes": 1, "party_c_votes": 1, "total_valid": 3,
                   "captured_at": "2026-10-08T13:00:00Z"}, headers=GH)
     check("submit unsigned -> 403", st == 403, f"got {st}")
-    bad_sig = sign_payload(OCCUPIED_PU, 1, 1, 1, "not-the-agent-key")
+    bad_sig = sign_payload(OCCUPIED_PU, ECODE, 1, 1, 1, "not-the-agent-key")
     st, r = call("POST", "/results/submit",
                  {"pu_code": OCCUPIED_PU, "agent_email": AGENT_EMAIL, "party_a_votes": 1,
                   "party_b_votes": 1, "party_c_votes": 1, "total_valid": 3,
                   "captured_at": "2026-10-08T13:00:00Z", "signature": bad_sig}, headers=GH)
     check("submit wrong-key signature -> 403", st == 403, f"got {st}")
-    good_sig = sign_payload(OCCUPIED_PU, 1, 1, 1, agent_signing_key)
+    good_sig = sign_payload(OCCUPIED_PU, ECODE, 1, 1, 1, agent_signing_key)
     st, r = call("POST", "/results/submit",
                  {"pu_code": OCCUPIED_PU, "agent_email": AGENT_EMAIL, "party_a_votes": 1,
                   "party_b_votes": 1, "party_c_votes": 1, "total_valid": 3,
                   "captured_at": "2026-10-08T13:00:00Z", "signature": good_sig}, headers=GH)
-    check("agent submit full chain -> 409 WORM (regression)", st == 409, f"got {st}")
+    check("agent submit full chain -> 200 committed", st == 200 and r.get("result_id"), f"got {st}")
+    st, r = call("POST", "/results/submit",
+                 {"pu_code": OCCUPIED_PU, "agent_email": AGENT_EMAIL, "party_a_votes": 1,
+                  "party_b_votes": 1, "party_c_votes": 1, "total_valid": 3,
+                  "captured_at": "2026-10-08T13:00:00Z", "signature": good_sig}, headers=GH)
+    check("duplicate submit -> 409 WORM", st == 409, f"got {st}")
 
     # ---------- key rotation ----------
     st, r = call("POST", "/admin/agents/rotate-signing-key", {"email": AGENT_EMAIL}, headers=AH)
     new_key = r.get("signing_key")
     check("admin rotate signing key -> 200 + new key", st == 200 and bool(new_key), f"got {st}")
-    old_key_sig = sign_payload(OCCUPIED_PU, 1, 1, 1, agent_signing_key)
+    old_key_sig = sign_payload(OCCUPIED_PU, ECODE, 1, 1, 1, agent_signing_key)
     st, r = call("POST", "/results/submit",
                  {"pu_code": OCCUPIED_PU, "agent_email": AGENT_EMAIL, "party_a_votes": 1,
                   "party_b_votes": 1, "party_c_votes": 1, "total_valid": 3,
                   "captured_at": "2026-10-08T13:00:00Z", "signature": old_key_sig}, headers=GH)
     check("rotated-out key signature -> 403", st == 403, f"got {st}")
-    new_key_sig = sign_payload(OCCUPIED_PU, 1, 1, 1, new_key)
+    new_key_sig = sign_payload(OCCUPIED_PU, ECODE, 1, 1, 1, new_key)
     st, r = call("POST", "/results/submit",
                  {"pu_code": OCCUPIED_PU, "agent_email": AGENT_EMAIL, "party_a_votes": 1,
                   "party_b_votes": 1, "party_c_votes": 1, "total_valid": 3,
@@ -273,4 +304,7 @@ finally:
         f"DELETE FROM agent_assignments WHERE agent_id IN (SELECT id FROM users WHERE email IN ('{ADMIN_EMAIL}','{AGENT_EMAIL}')); "
         f"DELETE FROM audit_logs WHERE actor_id IN (SELECT id FROM users WHERE email IN ('{ADMIN_EMAIL}','{AGENT_EMAIL}')); "
         f"DELETE FROM users WHERE email IN ('{ADMIN_EMAIL}','{AGENT_EMAIL}');")
-    print("cleanup: temp accounts removed")
+    if ELECTION_ID:
+        sql(f"DELETE FROM election_polling_units WHERE election_id = '{ELECTION_ID}'; "
+            f"DELETE FROM elections WHERE id = '{ELECTION_ID}';")
+    print("cleanup: temp accounts + sandbox election removed")

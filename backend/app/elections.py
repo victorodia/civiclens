@@ -48,6 +48,35 @@ def assert_in_scope(election_id: str, scoped_ids):
         raise HTTPException(404, "Election not found.")
 
 
+async def resolve_default_election(db: AsyncSession, agent: User):
+    """Legacy clients send no election_id. Resolve the election they mean:
+
+    1. the GENERAL registry default, if one exists (pre-multi-tenant
+       installs); otherwise
+    2. the SINGLE election the agent is accredited for — only when
+       unambiguous (exactly one distinct assignment).
+
+    Returns (election, assignment). (None, None) when the intent is
+    ambiguous (zero or multiple assignments): the caller must refuse,
+    because collating into the wrong race is exactly the mismatch the
+    multi-election design exists to prevent.
+    """
+    gen = (await db.execute(select(Election).where(Election.code == "GENERAL"))).scalar_one_or_none()
+    if gen:
+        return gen, None
+    rows = (await db.execute(
+        select(AgentAssignment).where(AgentAssignment.agent_id == agent.id)
+    )).scalars().all()
+    by_election = {}
+    for r in rows:
+        by_election.setdefault(r.election_id, r)
+    if len(by_election) == 1:
+        eid = next(iter(by_election))
+        election = (await db.execute(select(Election).where(Election.id == eid))).scalar_one_or_none()
+        return election, by_election[eid]
+    return None, None
+
+
 class ClientCreateSchema(BaseModel):
     name: str
     contact_email: Optional[str] = None
@@ -300,7 +329,14 @@ async def create_election(
         client_id = payload.client_id or INTERNAL_CLIENT_ID
         client = (await db.execute(select(Client).where(Client.id == client_id))).scalar_one_or_none()
         if not client:
-            raise HTTPException(404, "Client not found.")
+            if client_id == INTERNAL_CLIENT_ID:
+                # Fresh installs: the platform's own tenant row is seeded on
+                # first use instead of 404-ing election creation.
+                client = Client(id=INTERNAL_CLIENT_ID, name="CivicLens Internal")
+                db.add(client)
+                await db.flush()
+            else:
+                raise HTTPException(404, "Client not found.")
 
     election = Election(
         client_id=client_id,

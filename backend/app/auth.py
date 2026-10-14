@@ -242,15 +242,21 @@ async def agent_check_in(payload: CheckInSchema, db: AsyncSession = Depends(get_
         election = (await db.execute(_select(Election).where(Election.id == payload.election_id))).scalar_one_or_none()
         assigned_pu_id = assignment.pu_id
     else:
-        # Legacy fallback: default election + the user-row PU pointer.
-        election = (await db.execute(_select(Election).where(Election.code == "GENERAL"))).scalar_one_or_none()
-        assigned_pu_id = current_user.assigned_pu_id
-        if election and assigned_pu_id:
-            assignment = (await db.execute(_select(AgentAssignment).where(
-                AgentAssignment.agent_id == current_user.id,
-                AgentAssignment.election_id == election.id,
-                AgentAssignment.pu_id == assigned_pu_id,
-            ))).scalar_one_or_none()
+        # Legacy fallback: default election (GENERAL if the registry still
+        # has one, else the agent's single accredited election) + its PU.
+        from .elections import resolve_default_election
+        election, legacy_assignment = await resolve_default_election(db, current_user)
+        if legacy_assignment:
+            assigned_pu_id = legacy_assignment.pu_id
+            assignment = legacy_assignment
+        else:
+            assigned_pu_id = current_user.assigned_pu_id
+            if election and assigned_pu_id:
+                assignment = (await db.execute(_select(AgentAssignment).where(
+                    AgentAssignment.agent_id == current_user.id,
+                    AgentAssignment.election_id == election.id,
+                    AgentAssignment.pu_id == assigned_pu_id,
+                ))).scalar_one_or_none()
         if not assigned_pu_id:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No assigned polling unit on record.")
 

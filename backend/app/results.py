@@ -130,19 +130,19 @@ async def submit_election_result(
     """
 
     # 0. Resolve the election FIRST — every downstream check (signature,
-    # accreditation, muster roll, dedupe) binds to it. The election is
-    # resolved from the payload's election_id against the server registry;
-    # a missing election_id means a legacy app and binds to the default
-    # GENERAL election.
+    # accreditation, muster roll, dedupe) binds to it. Explicit election_id
+    # wins; a missing election_id means a legacy app and binds to the default
+    # election — GENERAL if the registry still has one, else the single
+    # election the agent is accredited for (refused as 409 when ambiguous).
     from .models import Election, AgentAssignment, AgentCheckIn
+    from .elections import resolve_default_election
     if payload.election_id:
         election_res = await db.execute(select(Election).where(Election.id == payload.election_id))
         election = election_res.scalar_one_or_none()
         if not election:
             raise HTTPException(status_code=404, detail="Unknown election.")
     else:
-        election_res = await db.execute(select(Election).where(Election.code == "GENERAL"))
-        election = election_res.scalar_one_or_none()
+        election, _legacy_assignment = await resolve_default_election(db, agent)
     if not election:
         raise HTTPException(status_code=409, detail="No election is configured on this server.")
 
