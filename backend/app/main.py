@@ -210,12 +210,6 @@ from sqlalchemy.ext.asyncio import AsyncSession as _AsyncSession
 from fastapi import Depends as _Depends
 from app.security import RequirePermission
 
-class _ElectionConfigSchema(PydanticBase):
-    party_a_name: str
-    party_b_name: str
-    party_c_name: str
-    election_name: str
-
 @app.get("/admin/election-config", tags=["Election Config"])
 async def get_election_config(db: _AsyncSession = _Depends(_get_db)):
     from app.models import ElectionConfig
@@ -229,37 +223,3 @@ async def get_election_config(db: _AsyncSession = _Depends(_get_db)):
         await db.refresh(config)
     return {"party_a_name": config.party_a_name, "party_b_name": config.party_b_name, "party_c_name": config.party_c_name, "election_name": config.election_name}
 
-@app.put("/admin/election-config", tags=["Election Config"])
-async def update_election_config(payload: _ElectionConfigSchema, db: _AsyncSession = _Depends(_get_db), user = _Depends(RequirePermission("trigger_factory_reset"))):
-    # Tenancy: this legacy config row is shared platform-wide — one client's
-    # write would change every other client's labels. Platform-only; each
-    # election carries its own party names at creation.
-    if getattr(user, "client_id", None) is not None:
-        from fastapi import HTTPException as _HE
-        raise _HE(status_code=403, detail="Election configuration is restricted to platform administrators.")
-    from app.models import ElectionConfig
-    from datetime import datetime
-    result = await db.execute(sa_select(ElectionConfig).where(ElectionConfig.id == "global"))
-    config = result.scalar_one_or_none()
-    if not config:
-        config = ElectionConfig(id="global")
-        db.add(config)
-    config.party_a_name = payload.party_a_name.strip()
-    config.party_b_name = payload.party_b_name.strip()
-    config.party_c_name = payload.party_c_name.strip()
-    config.election_name = payload.election_name.strip()
-    config.updated_at = datetime.utcnow()
-    from app.security import log_audit as _log_audit
-    await _log_audit(
-        db,
-        actor_id=str(user.id),
-        actor_role=getattr(user, "role", None),
-        action="ELECTION_CONFIG_UPDATE",
-        target_type="election_config",
-        target_id="global",
-        details=f"Party labels updated: A={config.party_a_name}, B={config.party_b_name}, C={config.party_c_name}",
-        ip_address=None,
-    )
-    await db.commit()
-    print(f"[CONFIG] Party names updated: A={config.party_a_name}, B={config.party_b_name}, C={config.party_c_name}")
-    return {"status": "success", "message": "Election configuration updated."}
