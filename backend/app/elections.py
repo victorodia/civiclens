@@ -141,8 +141,11 @@ async def create_client(
         raise HTTPException(409, f"A client named {name!r} already exists.")
     client = Client(name=name, contact_email=payload.contact_email, notes=payload.notes)
     db.add(client)
-    await log_audit(db, actor_id=str(user.id), action="CLIENT_CREATE",
-                    target_id=client.id, details=f"Created client {name!r}")
+    await log_audit(db, actor_id=str(user.id), actor_role=user.role,
+                    action="CLIENT_CREATE",
+                    tenant_id=client.id,
+                    target_type="client", target_id=client.id,
+                    details=f"Created client {name!r}")
     await db.commit()
     await db.refresh(client)
     return _client_to_dict(client, {})
@@ -179,8 +182,11 @@ async def update_client(
         client.contact_email = payload.contact_email or None
     if payload.notes is not None:
         client.notes = payload.notes or None
-    await log_audit(db, actor_id=str(user.id), action="CLIENT_UPDATE",
-                    target_id=client.id, details=f"Updated client {client.name!r}")
+    await log_audit(db, actor_id=str(user.id), actor_role=user.role,
+                    action="CLIENT_UPDATE",
+                    tenant_id=client.id,
+                    target_type="client", target_id=client.id,
+                    details=f"Updated client {client.name!r}")
     await db.commit()
     await db.refresh(client)
     return _client_to_dict(client, {})
@@ -207,8 +213,11 @@ async def delete_client(
         raise HTTPException(409,
                             f"Client still has {e_n} election(s) and {u_n} account(s) — "
                             "remove or reassign them first.")
-    await log_audit(db, actor_id=str(user.id), action="CLIENT_DELETE",
-                    target_id=client.id, details=f"Deleted client {client.name!r}")
+    await log_audit(db, actor_id=str(user.id), actor_role=user.role,
+                    action="CLIENT_DELETE",
+                    tenant_id=client.id,
+                    target_type="client", target_id=client.id,
+                    details=f"Deleted client {client.name!r}")
     await db.delete(client)
     await db.commit()
     return {"status": "deleted", "id": client_id}
@@ -349,8 +358,11 @@ async def create_election(
         party_c_name=payload.party_c_name or "Party C",
     )
     db.add(election)
-    await log_audit(db, actor_id=str(user.id), action="ELECTION_CREATE",
-                    target_id=election.id,
+    await log_audit(db, actor_id=str(user.id), actor_role=user.role,
+                    action="ELECTION_CREATE",
+                    tenant_id=election.client_id,
+                    election_id=election.id,
+                    target_type="election", target_id=election.id,
                     details=f"Created election {code} ({payload.type})")
     await db.commit()
     await db.refresh(election)
@@ -372,8 +384,11 @@ async def set_election_status(
     assert_in_scope(election.id, await client_scope_election_ids(db, user))
 
     election.status = payload.status
-    await log_audit(db, actor_id=str(user.id), action="ELECTION_STATUS",
-                    target_id=election.id,
+    await log_audit(db, actor_id=str(user.id), actor_role=user.role,
+                    action="ELECTION_STATUS",
+                    tenant_id=election.client_id,
+                    election_id=election.id,
+                    target_type="election", target_id=election.id,
                     details=f"Status {election.code} -> {payload.status}")
     await db.commit()
     return {"status": "success", "election_id": election.id, "new_status": payload.status}
@@ -442,8 +457,11 @@ async def set_election_scope(
                                             .where(ElectionPU.election_id == election_id)))
     )
     await db.execute(text("SET LOCAL session_replication_role = origin"))
-    await log_audit(db, actor_id=str(user.id), action="ELECTION_SCOPE",
-                    target_id=election.id,
+    await log_audit(db, actor_id=str(user.id), actor_role=user.role,
+                    action="ELECTION_SCOPE",
+                    tenant_id=election.client_id,
+                    election_id=election.id,
+                    target_type="election", target_id=election.id,
                     details=f"Scope set to {n_pus} PUs "
                             f"({len(payload.state_ids or [])} states, "
                             f"{len(payload.lga_ids or [])} LGAs); "
@@ -553,7 +571,11 @@ async def delete_election(
     await log_audit(
         db,
         actor_id=str(user.id),
+        actor_role=user.role,
         action="ELECTION_DELETE",
+        tenant_id=election.client_id,
+        election_id=election_id,
+        target_type="election",
         target_id=election_id,
         details=f"Election {election.name!r} ({election.code}) deleted: {n_results} result(s), "
                 f"{n_files} evidence file(s), {n_agents} exclusive agent account(s) trashed."
@@ -629,8 +651,11 @@ async def create_assignment(
     db.add(assignment)
     # Keep the legacy user-row pointer in sync so older admin views keep working
     agent.assigned_pu_id = payload.pu_id
-    await log_audit(db, actor_id=str(user.id), action="AGENT_ASSIGN",
-                    target_id=agent.id,
+    await log_audit(db, actor_id=str(user.id), actor_role=user.role,
+                    action="AGENT_ASSIGN",
+                    tenant_id=election.client_id,
+                    election_id=election.id,
+                    target_type="agent_assignment", target_id=agent.id,
                     details=f"Agent {agent.email} -> {election.code} / PU {payload.pu_id}")
     await db.commit()
     await db.refresh(assignment)
@@ -657,7 +682,12 @@ async def delete_assignment(
         {"a": agent_id, "e": assignment.election_id},
     )
     await db.delete(assignment)
-    await log_audit(db, actor_id=str(user.id), action="AGENT_UNASSIGN",
-                    target_id=agent_id, details=f"Removed assignment {assignment_id}")
+    _u_election = (await db.execute(select(Election).where(Election.id == assignment.election_id))).scalar_one_or_none()
+    await log_audit(db, actor_id=str(user.id), actor_role=user.role,
+                    action="AGENT_UNASSIGN",
+                    tenant_id=_u_election.client_id if _u_election else None,
+                    election_id=assignment.election_id,
+                    target_type="agent_assignment", target_id=agent_id,
+                    details=f"Removed assignment {assignment_id}")
     await db.commit()
     return {"status": "success"}

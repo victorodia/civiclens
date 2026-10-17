@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Integer, Boolean, DateTime, ForeignKey, Text, Float, JSON, UniqueConstraint
+from sqlalchemy import Column, String, Integer, BigInteger, Boolean, DateTime, ForeignKey, Text, Float, JSON, UniqueConstraint
 from sqlalchemy.orm import relationship
 from .db import Base
 
@@ -20,18 +20,39 @@ class ElectionConfig(Base):
 
 class AuditLog(Base):
     """
-    WORM (Write Once, Read Many) Audit Log Table.
-    Every sensitive action (login, verification, manual override) MUST write an entry here.
+    WORM (Write Once, Read Many) Audit Log Table — hash-chained.
+
+    Every sensitive action (authentication, administration, field activity,
+    security events) appends one row here. Each row's row_hash covers its
+    content PLUS the previous row's hash, so any later edit, deletion or
+    insertion breaks the chain and is detectable via /admin/audit-logs/verify.
+
+    `seq` is drawn from the audit_log_seq Postgres sequence and gives a single
+    global ordering across gunicorn workers; appends are serialized by a
+    transaction-scoped advisory lock inside security.log_audit.
+
+    `tenant_id` is the institution the event BELONGS TO (the owning tenant of
+    the object acted on, or the actor's own institution for auth events);
+    NULL means platform-level. Client admins read only their own tenant's
+    rows — same wall as every other screen.
     """
     __tablename__ = "audit_logs"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    seq = Column(BigInteger, nullable=True, index=True)
     actor_id = Column(String(36), index=True) # ID of user pushing the action
-    action_type = Column(String(50), nullable=False)  # e.g., 'VERIFY_RESULT', 'DURESS_LOGIN'
+    actor_role = Column(String(30), nullable=True)
+    tenant_id = Column(String(36), nullable=True, index=True) # owning institution; NULL = platform-level
+    action_type = Column(String(50), nullable=False)  # e.g., 'LOGIN_SUCCESS', 'ELECTION_SCOPE', 'RESULT_SUBMISSION'
+    target_type = Column(String(50), nullable=True)   # e.g., 'election', 'user', 'result', 'http_endpoint'
     target_entity_id = Column(String(100), nullable=True) # Result ID or User ID being acted upon
-    details = Column(Text, nullable=True) # JSON dump of pre/post states
+    election_id = Column(String(36), nullable=True, index=True) # race context when applicable
+    details = Column(Text, nullable=True) # JSON dump of pre/post states — never secrets
     ip_address = Column(String(45), nullable=True)
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    device_fingerprint = Column(String(255), nullable=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    prev_hash = Column(String(64), nullable=True) # hash of the previous row (genesis constant for the first)
+    row_hash = Column(String(64), nullable=True, index=True) # sha256 over the canonical row + prev_hash
 
 
 class CustomRole(Base):

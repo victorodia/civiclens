@@ -9,8 +9,10 @@ from app.admin import router as admin_router
 from app.results import router as results_router
 from app.public import router as public_router
 from app.elections import router as elections_router
+from app.audit import router as audit_router
 from fastapi.staticfiles import StaticFiles
 import os
+from datetime import datetime
 
 app = FastAPI(
     title="Civic Lens Zero-Trust API",
@@ -58,7 +60,45 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 4. Advanced Security Headers Middleware
+# 4b. Audit denied requests that CARRIED a credential — an expired, replayed
+# or insufficient-privilege token is a security signal worth keeping. Bearer-
+# less probes (port scans, the lockdown suite's no-token 401 checks) are
+# visible at the gateway and would only flood the chain here.
+@app.middleware("http")
+async def audit_denied_requests(request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if (response.status_code in (401, 403)
+            and request.headers.get("authorization")
+            and path != "/health" and not path.startswith("/static")):
+        try:
+            from app.db import AsyncSessionLocal
+            from app.security import ALGORITHM, SECRET_KEY, log_audit
+            from jose import jwt as _jwt
+            actor_id = actor_role = None
+            try:
+                token = request.headers["authorization"].replace("Bearer ", "")
+                claims = _jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+                actor_id, actor_role = claims.get("sub"), claims.get("role")
+            except Exception:
+                pass  # unparseable token — logged without an actor
+            async with AsyncSessionLocal() as s:
+                await log_audit(
+                    s,
+                    actor_id=actor_id,
+                    actor_role=actor_role,
+                    action="AUTH_DENIED",
+                    target_type="http_endpoint",
+                    target_id=path,
+                    details=f"{request.method} {path} -> {response.status_code}",
+                    ip_address=request.client.host if request.client else None,
+                )
+                await s.commit()
+        except Exception:
+            pass  # audit logging must never break the underlying request
+    return response
+
+# 5. Advanced Security Headers Middleware
 @app.middleware("http")
 async def add_security_headers(request, call_next):
     response = await call_next(request)
@@ -76,6 +116,7 @@ app.include_router(admin_router)
 app.include_router(results_router)
 app.include_router(elections_router)
 app.include_router(public_router)
+app.include_router(audit_router)
 
 @app.on_event("startup")
 async def _ensure_schema():
@@ -96,6 +137,58 @@ async def _ensure_schema():
         await conn.execute(text(
             "ALTER TABLE results ADD COLUMN IF NOT EXISTS "
             "gps_trail_flag BOOLEAN DEFAULT FALSE"))
+
+        # ── Audit log: hash chain upgrade ──────────────────────────────
+        # New columns for the chained WORM audit log (existing rows are
+        # backfilled below); the sequence gives every row a global order.
+        await conn.execute(text("CREATE SEQUENCE IF NOT EXISTS audit_log_seq"))
+        for ddl in (
+            "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS seq BIGINT",
+            "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS actor_role VARCHAR(30)",
+            "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(36)",
+            "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS target_type VARCHAR(50)",
+            "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS election_id VARCHAR(36)",
+            "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS device_fingerprint VARCHAR(255)",
+            "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS prev_hash VARCHAR(64)",
+            "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS row_hash VARCHAR(64)",
+            "CREATE INDEX IF NOT EXISTS ix_audit_logs_tenant_ts "
+            "ON audit_logs (tenant_id, timestamp)",
+            "CREATE INDEX IF NOT EXISTS ix_audit_logs_election "
+            "ON audit_logs (election_id)",
+        ):
+            await conn.execute(text(ddl))
+
+    # Backfill legacy (pre-chain) rows: order by timestamp, draw seq values,
+    # hash each row chaining from the current tip. Fresh installs skip this.
+    from app.db import AsyncSessionLocal
+    from app.models import AuditLog
+    from app.security import AUDIT_GENESIS_HASH, audit_canonical
+    from sqlalchemy import select as _sa_select
+    import hashlib as _hl
+    async with AsyncSessionLocal() as s:
+        legacy = (await s.execute(
+            _sa_select(AuditLog).where(AuditLog.row_hash.is_(None))
+            .order_by(AuditLog.timestamp.asc(), AuditLog.id.asc())
+        )).scalars().all()
+        if legacy:
+            prev = (await s.execute(
+                _sa_select(AuditLog.row_hash)
+                .where(AuditLog.row_hash.isnot(None))
+                .order_by(AuditLog.seq.desc()).limit(1))).scalar() or AUDIT_GENESIS_HASH
+            for r in legacy:
+                seq = (await s.execute(
+                    text("SELECT nextval('audit_log_seq')"))).scalar()
+                ts = r.timestamp or datetime.utcnow()
+                r.seq = seq
+                r.prev_hash = prev
+                r.row_hash = _hl.sha256(audit_canonical(
+                    seq, ts, r.actor_id, r.actor_role, r.tenant_id,
+                    r.action_type, r.target_type, r.target_entity_id,
+                    r.election_id, r.details, r.ip_address,
+                    r.device_fingerprint, prev).encode()).hexdigest()
+                prev = r.row_hash
+            await s.commit()
+            print(f"[STARTUP] Audit chain backfilled: {len(legacy)} legacy row(s) hashed")
     print("[STARTUP] Schema check complete (incl. agent_location_pings)")
 
 # Mount Static Files for Evidence Visibility
@@ -156,6 +249,17 @@ async def update_election_config(payload: _ElectionConfigSchema, db: _AsyncSessi
     config.party_c_name = payload.party_c_name.strip()
     config.election_name = payload.election_name.strip()
     config.updated_at = datetime.utcnow()
+    from app.security import log_audit as _log_audit
+    await _log_audit(
+        db,
+        actor_id=str(user.id),
+        actor_role=getattr(user, "role", None),
+        action="ELECTION_CONFIG_UPDATE",
+        target_type="election_config",
+        target_id="global",
+        details=f"Party labels updated: A={config.party_a_name}, B={config.party_b_name}, C={config.party_c_name}",
+        ip_address=None,
+    )
     await db.commit()
     print(f"[CONFIG] Party names updated: A={config.party_a_name}, B={config.party_b_name}, C={config.party_c_name}")
     return {"status": "success", "message": "Election configuration updated."}

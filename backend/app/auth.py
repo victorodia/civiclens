@@ -1,9 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Header
+from fastapi import APIRouter, Depends, HTTPException, status, Header, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 
 from .db import get_db
-from .security import check_login_attempt, create_access_token, check_rate_limit, get_current_user
+from .security import check_login_attempt, create_access_token, check_rate_limit, get_current_user, log_audit
 # from .models import User  # We would import this in a finalized system
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -19,11 +19,13 @@ class LoginSchema(BaseModel):
 @router.post("/login")
 async def login(
     payload: LoginSchema,
+    request: Request,
     db: AsyncSession = Depends(get_db)
 ):
     email = payload.email
     password = payload.password
     device_fingerprint = payload.device_fingerprint
+    client_ip = request.client.host if request.client else None
     """
     Highly secure login endpoint. 
     """
@@ -54,15 +56,34 @@ async def login(
     row = res.first()
     
     if not row:
-         raise HTTPException(status_code=401, detail="Invalid credentials")
+        await log_audit(db, action="LOGIN_FAILED",
+                        details=f"Unknown email attempted login: {email}",
+                        ip_address=client_ip)
+        await db.commit()
+        raise HTTPException(status_code=401, detail="Invalid credentials")
 
     user, pu, ward, lga, state = row
 
     if not user.is_active:
+        await log_audit(db, actor_id=str(user.id), actor_role=user.role,
+                        action="LOGIN_INACTIVE",
+                        tenant_id=getattr(user, "client_id", None),
+                        target_type="user", target_id=str(user.id),
+                        details=f"Deactivated account attempted login: {email}",
+                        ip_address=client_ip)
+        await db.commit()
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account has been deactivated. Contact the system administrator.")
 
     # 2. Device Fingerprinting Challenge
     if user.device_fingerprint and device_fingerprint != user.device_fingerprint:
+        await log_audit(db, actor_id=str(user.id), actor_role=user.role,
+                        action="LOGIN_DEVICE_REJECTED",
+                        tenant_id=getattr(user, "client_id", None),
+                        target_type="user", target_id=str(user.id),
+                        details=f"Login rejected: unrecognized device for {email}",
+                        ip_address=client_ip,
+                        device_fingerprint=device_fingerprint)
+        await db.commit()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, 
             detail="Unrecognized Device."
@@ -77,6 +98,14 @@ async def login(
     
     if not is_authenticated:
         print(f"[AUTH] Failed login attempt for {email}")
+        await log_audit(db, actor_id=str(user.id), actor_role=user.role,
+                        action="LOGIN_FAILED",
+                        tenant_id=getattr(user, "client_id", None),
+                        target_type="user", target_id=str(user.id),
+                        details=f"Failed password for {email}",
+                        ip_address=client_ip,
+                        device_fingerprint=device_fingerprint)
+        await db.commit()
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     # 3.5 MFA Challenge (TOTP)
@@ -91,11 +120,29 @@ async def login(
         import pyotp
         totp = pyotp.TOTP(user.totp_secret)
         if not totp.verify(payload.mfa_token):
+            await log_audit(db, actor_id=str(user.id), actor_role=user.role,
+                            action="MFA_REJECT",
+                            tenant_id=getattr(user, "client_id", None),
+                            target_type="user", target_id=str(user.id),
+                            details=f"Invalid or expired MFA token at login for {email}",
+                            ip_address=client_ip)
+            await db.commit()
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid or expired MFA token."
             )
         print(f"[SECURITY] MFA Verified for user {user.email}")
+
+    # 3.6 Successful authentication — chained audit row. Duress logins get
+    # their own action name so the situation room can filter the silent
+    # alarm without parsing details.
+    await log_audit(db, actor_id=str(user.id), actor_role=user.role,
+                    action="LOGIN_DURESS" if is_under_duress else "LOGIN_SUCCESS",
+                    tenant_id=getattr(user, "client_id", None),
+                    target_type="user", target_id=str(user.id),
+                    details=f"Login {'under DURESS ' if is_under_duress else ''}for {email} (role={user.role})",
+                    ip_address=client_ip,
+                    device_fingerprint=device_fingerprint)
 
     if user.requires_password_reset:
         return {
@@ -222,6 +269,12 @@ async def agent_check_in(payload: CheckInSchema, db: AsyncSession = Depends(get_
     if current_user.role != "agent":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only field agents can check in.")
     if payload.email.lower() != current_user.email.lower():
+        await log_audit(db, actor_id=str(current_user.id), actor_role="agent",
+                        action="CHECKIN_IDENTITY_REJECT",
+                        tenant_id=getattr(current_user, "client_id", None),
+                        target_type="agent_checkin", target_id=str(current_user.id),
+                        details=f"Check-in email {payload.email} does not match the authenticated agent")
+        await db.commit()
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Check-in identity does not match the authenticated agent.")
 
     print(f"[CHECK-IN] Received payload: email={payload.email}, lat={payload.latitude}, lng={payload.longitude}, election={payload.election_id}")
@@ -265,6 +318,7 @@ async def agent_check_in(payload: CheckInSchema, db: AsyncSession = Depends(get_
 
     # Geofence: when the assigned PU has anchor coordinates on record, the
     # check-in GPS must be within GEOFENCE_RADIUS_METRES of them.
+    dist_m = None
     if pu and payload.latitude is not None and payload.longitude is not None:
         import math as _math
         import os as _os
@@ -282,6 +336,13 @@ async def agent_check_in(payload: CheckInSchema, db: AsyncSession = Depends(get_
                 dist_m = 2 * 6371000 * _math.asin(_math.sqrt(a))
                 if dist_m > radius:
                     print(f"[CHECK-IN] Rejected: {payload.email} is {dist_m:.0f}m from PU {pu.pu_code} anchor")
+                    await log_audit(db, actor_id=str(current_user.id), actor_role="agent",
+                                    action="CHECKIN_GEOFENCE_REJECT",
+                                    tenant_id=getattr(current_user, "client_id", None),
+                                    election_id=election.id if election else None,
+                                    target_type="agent_checkin", target_id=str(current_user.id),
+                                    details=f"Check-in rejected: {int(dist_m)}m from PU {pu.pu_code} anchor (radius {int(radius)}m), election={election.code if election else 'legacy'}")
+                    await db.commit()
                     raise HTTPException(
                         status_code=status.HTTP_403_FORBIDDEN,
                         detail=f"Check-in rejected: you appear to be {int(dist_m)}m from your assigned polling unit. Move on-site and try again."
@@ -310,6 +371,15 @@ async def agent_check_in(payload: CheckInSchema, db: AsyncSession = Depends(get_
     user.last_check_in = datetime.utcnow()
     user.check_in_lat = payload.latitude
     user.check_in_lng = payload.longitude
+    await db.commit()
+
+    await log_audit(db, actor_id=str(current_user.id), actor_role="agent",
+                    action="CHECKIN_SUCCESS",
+                    tenant_id=getattr(current_user, "client_id", None),
+                    election_id=election.id if election else None,
+                    target_type="agent_checkin", target_id=str(current_user.id),
+                    details=f"Verify entry confirmed for {payload.email} at PU {pu.pu_code if pu else assigned_pu_id}"
+                            + (f" ({int(dist_m)}m from anchor)" if dist_m is not None else " (no GPS fix)"))
     await db.commit()
 
     print(f"[CHECK-IN] Persisted: lat={user.check_in_lat}, lng={user.check_in_lng}, election={election.code if election else 'legacy'}")
@@ -432,9 +502,16 @@ async def finalize_security_initialization(payload: SecurityInitializationSchema
     user.hashed_password = get_password_hash(payload.new_password)
     user.hashed_duress_password = get_password_hash(payload.duress_password)
     user.requires_password_reset = False
-    
+
     await db.commit()
-    
+
+    await log_audit(db, actor_id=str(user.id), actor_role=user.role,
+                    action="PASSWORD_INITIALIZED",
+                    tenant_id=getattr(user, "client_id", None),
+                    target_type="user", target_id=str(user.id),
+                    details=f"Primary and duress passwords set at first login for {payload.email}; temporary credential expired")
+    await db.commit()
+
     return {
         "status": "success",
         "message": "Security credentials fully initialized. Temporary password has been expired."

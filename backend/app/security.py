@@ -120,18 +120,70 @@ def verify_payload_signature(payload_string: str, signature_b64: str, signing_ke
         print(f"[SECURITY ERROR] Signature verification failed: {e}")
         return False
 
-# 4. Centralized Audit Logger
-async def log_audit(db: AsyncSession, actor_id: str, action: str, target_id: str = None, details: str = None):
-    """Writes a secure entry to the audit_logs table."""
+# 4. Centralized Audit Logger — hash-chained, WORM
+import hashlib as _audit_hashlib
+
+AUDIT_GENESIS_HASH = _audit_hashlib.sha256(b"civiclens-audit-genesis-v1").hexdigest()
+_AUDIT_APPEND_LOCK_KEY = 919191  # pg advisory lock: serializes chain appends across workers
+
+def audit_canonical(seq, ts, actor_id, actor_role, tenant_id, action,
+                    target_type, target_id, election_id, details,
+                    ip_address, device_fingerprint, prev_hash):
+    """Canonical string the row_hash commits to. Field order is fixed; any
+    change here must be mirrored in the /admin/audit-logs/verify endpoint."""
+    return "|".join("" if v is None else str(v) for v in (
+        seq, ts, actor_id, actor_role, tenant_id, action, target_type,
+        target_id, election_id, details, ip_address, device_fingerprint,
+        prev_hash))
+
+async def log_audit(db: AsyncSession, actor_id: str = None, action: str = None,
+                    target_id: str = None, details: str = None,
+                    actor_role: str = None, tenant_id: str = None,
+                    target_type: str = None, election_id: str = None,
+                    ip_address: str = None, device_fingerprint: str = None):
+    """Appends a hash-chained entry to the audit_logs table.
+
+    Chain safety: a transaction-scoped advisory lock serializes appends, so
+    concurrent gunicorn workers always extend the single tip. The row is
+    committed by the caller's transaction (same pattern as before); on
+    rollback the row vanishes but the chain stays valid because linkage is
+    by hash, not by consecutive seq values (nextval gaps are harmless).
+    Never log secrets: passwords, duress indicators beyond a flag, TOTP
+    seeds and signing keys must never appear in `details`.
+    """
     from .models import AuditLog
-    new_log = AuditLog(
+    from sqlalchemy import select as _select, text as _text
+    try:
+        await db.execute(_text("SELECT pg_advisory_xact_lock(:k)"), {"k": _AUDIT_APPEND_LOCK_KEY})
+    except Exception:
+        pass  # sqlite dev environments have no advisory locks — best effort only
+    seq = (await db.execute(_text("SELECT nextval('audit_log_seq')"))).scalar()
+    tip = (await db.execute(
+        _select(AuditLog.row_hash)
+        .where(AuditLog.row_hash.isnot(None))
+        .order_by(AuditLog.seq.desc()).limit(1))).scalar()
+    prev_hash = tip or AUDIT_GENESIS_HASH
+    ts = datetime.utcnow()
+    row_hash = _audit_hashlib.sha256(audit_canonical(
+        seq, ts, actor_id, actor_role, tenant_id, action, target_type,
+        target_id, election_id, details, ip_address, device_fingerprint,
+        prev_hash).encode()).hexdigest()
+    db.add(AuditLog(
+        seq=seq,
         actor_id=actor_id,
+        actor_role=actor_role,
+        tenant_id=tenant_id,
         action_type=action,
+        target_type=target_type,
         target_entity_id=target_id,
-        details=details
-    )
-    db.add(new_log)
-    # We don't commit here; we let the parent transaction handle it.
+        election_id=election_id,
+        details=details,
+        ip_address=ip_address,
+        device_fingerprint=device_fingerprint,
+        timestamp=ts,
+        prev_hash=prev_hash,
+        row_hash=row_hash,
+    ))
 
 # 5. Production Kill-Switch & Status Enforcement
 async def check_user_status(user_id: str, device_fingerprint: str, db: AsyncSession) -> bool:

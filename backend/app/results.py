@@ -187,9 +187,14 @@ async def submit_election_result(
         await log_audit(
             db,
             actor_id=agent.id,
+            actor_role="agent",
             action="SIGNATURE_REJECT",
+            tenant_id=election.client_id,
+            election_id=election.id,
+            target_type="result",
             target_id=payload.pu_code,
-            details=f"Signature mismatch on submission. Election={election.code}, election_id_in_payload={payload.election_id}"
+            details=f"Signature mismatch on submission. Election={election.code}, election_id_in_payload={payload.election_id}",
+            device_fingerprint=x_device_fingerprint,
         )
         await db.commit()
         raise HTTPException(
@@ -241,9 +246,14 @@ async def submit_election_result(
             await log_audit(
                 db,
                 actor_id=agent.id,
+                actor_role="agent",
                 action="ACCREDITATION_REJECT",
+                tenant_id=election.client_id,
+                election_id=election.id,
+                target_type="result",
                 target_id=payload.pu_code,
-                details=f"Agent lacks an assignment for election {election.code} at this PU"
+                details=f"Agent lacks an assignment for election {election.code} at this PU",
+                device_fingerprint=x_device_fingerprint,
             )
             await db.commit()
             raise HTTPException(
@@ -274,6 +284,19 @@ async def submit_election_result(
 
     if check_in_time is None:
         print(f"[SECURITY] Submission rejected: agent {agent.email} has not verified entry for {election.code}")
+        await log_audit(
+            db,
+            actor_id=agent.id,
+            actor_role="agent",
+            action="MUSTER_GATE_REJECT",
+            tenant_id=election.client_id,
+            election_id=election.id,
+            target_type="result",
+            target_id=payload.pu_code,
+            details=f"Submission blocked: no Verify Entry session for election {election.code}",
+            device_fingerprint=x_device_fingerprint,
+        )
+        await db.commit()
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access Denied: You must Verify Entry at your polling unit before sending results."
@@ -281,6 +304,19 @@ async def submit_election_result(
     check_in_age = (datetime.utcnow() - check_in_time).total_seconds() / 3600
     if check_in_age > max_age_hours:
         print(f"[SECURITY] Submission rejected: check-in stale ({check_in_age:.1f}h) for {agent.email} / {election.code}")
+        await log_audit(
+            db,
+            actor_id=agent.id,
+            actor_role="agent",
+            action="MUSTER_STALE_REJECT",
+            tenant_id=election.client_id,
+            election_id=election.id,
+            target_type="result",
+            target_id=payload.pu_code,
+            details=f"Submission blocked: Verify Entry session {check_in_age:.1f}h old (max {max_age_hours}h) for election {election.code}",
+            device_fingerprint=x_device_fingerprint,
+        )
+        await db.commit()
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Access Denied: Your entry verification has expired ({int(check_in_age)}h old). Verify Entry again before sending results."
@@ -290,9 +326,14 @@ async def submit_election_result(
         await log_audit(
             db,
             actor_id=agent.id,
+            actor_role="agent",
             action="SESSION_PU_MISMATCH",
+            tenant_id=election.client_id,
+            election_id=election.id,
+            target_type="result",
             target_id=payload.pu_code,
-            details=f"Check-in session is for a different PU/election than the submission target. Election={election.code}"
+            details=f"Check-in session is for a different PU/election than the submission target. Election={election.code}",
+            device_fingerprint=x_device_fingerprint,
         )
         await db.commit()
         raise HTTPException(
@@ -334,6 +375,19 @@ async def submit_election_result(
         Result.pu_id == pu.id,
         Result.election_id == election.id))
     if existing_res.scalar_one_or_none():
+        await log_audit(
+            db,
+            actor_id=agent.id,
+            actor_role="agent",
+            action="WORM_DUPLICATE_REJECT",
+            tenant_id=election.client_id,
+            election_id=election.id,
+            target_type="result",
+            target_id=payload.pu_code,
+            details=f"Duplicate submission rejected (409): PU {payload.pu_code} already reported for {election.code}",
+            device_fingerprint=x_device_fingerprint,
+        )
+        await db.commit()
         raise HTTPException(
             status_code=409, 
             detail="A result has already been collated for this Polling Unit. Collated data is immutable."
@@ -409,9 +463,14 @@ async def submit_election_result(
     await log_audit(
         db,
         actor_id=agent.id,
+        actor_role="agent",
         action="RESULT_SUBMISSION",
+        tenant_id=election.client_id,
+        election_id=election.id,
+        target_type="result",
         target_id=new_result.id,
-        details=f"Result committed for PU {payload.pu_code} (election {election.code}). Flagged={is_flagged}. Duress={is_under_duress}. GpsTrailFlag={gps_trail_flag}"
+        details=f"Result committed for PU {payload.pu_code} (election {election.code}). Flagged={is_flagged}. Duress={is_under_duress}. GpsTrailFlag={gps_trail_flag}",
+        device_fingerprint=x_device_fingerprint,
     )
 
     await db.commit()

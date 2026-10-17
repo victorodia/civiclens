@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .db import get_db
 from .ocr_service import extract_votes_from_image
 from .models import User
-from .security import get_current_user, check_user_status
+from .security import get_current_user, check_user_status, log_audit
 
 router = APIRouter(prefix="/upload", tags=["Evidence Storage"])
 
@@ -59,6 +59,15 @@ async def secure_image_upload(
     
     # Return local URL for development
     local_url = f"http://127.0.0.1:8001/static/uploads/{unique_filename}"
+
+    await log_audit(db, actor_id=str(agent.id), actor_role="agent",
+                    action="EVIDENCE_UPLOADED",
+                    tenant_id=getattr(agent, "client_id", None),
+                    target_type="evidence",
+                    target_id=unique_filename,
+                    details=f"{file.content_type} evidence uploaded ({len(content)} bytes)",
+                    device_fingerprint=x_device_fingerprint)
+    await db.commit()
 
     return {
         "status": "success",

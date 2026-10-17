@@ -107,10 +107,15 @@ async def approve_result(result_id: str, action: str, db: AsyncSession = Depends
         result.is_flagged = False # Target for re-submission or manual audit
         
     # Audit this human verification event
+    _v_election = (await db.execute(select(Election).where(Election.id == result.election_id))).scalar_one_or_none()
     await log_audit(
         db, 
         actor_id=str(user.id),
-        action=f"RESULT_{action.upper()}", 
+        actor_role=user.role,
+        action=f"RESULT_{action.upper()}",
+        tenant_id=_v_election.client_id if _v_election else getattr(user, "client_id", None),
+        election_id=result.election_id,
+        target_type="result",
         target_id=result_id,
         details=f"Human verification action: {action}"
     )
@@ -228,6 +233,12 @@ async def provision_new_agents(payload: ProvisionSchema, db: AsyncSession = Depe
         if election:
             db.add(AgentAssignment(agent_id=new_agent.id, election_id=election.id,
                                    pu_id=payload.polling_unit_id))
+        await log_audit(db, actor_id=str(user.id), actor_role=user.role,
+                        action="AGENT_PROVISIONED",
+                        tenant_id=agent_client_id,
+                        election_id=election.id if election else None,
+                        target_type="user", target_id=new_agent.id,
+                        details=f"Agent provisioned: {email} (temporary password + signing key issued once)")
         results[email] = {"temp_password": temp_pwd, "signing_key": signing_key}
 
     await db.commit()
@@ -313,7 +324,10 @@ async def rotate_agent_signing_key(payload: RotateKeySchema, db: AsyncSession = 
     await log_audit(
         db,
         actor_id=str(user.id),
+        actor_role=user.role,
         action="AGENT_KEY_ROTATED",
+        tenant_id=agent.client_id,
+        target_type="user",
         target_id=str(agent.id),
         details=f"Device signing key re-issued for {payload.email}"
     )
@@ -450,7 +464,10 @@ async def revoke_agent(agent_id: str, payload: RevokeSchema, db: AsyncSession = 
     await log_audit(
         db,
         actor_id=str(user.id),
+        actor_role=user.role,
         action="AGENT_REVOCATION",
+        tenant_id=agent.client_id,
+        target_type="user",
         target_id=agent_id,
         details=f"Access revoked for agent: {agent.email} (account deactivated; results and evidence preserved)."
     )
@@ -521,7 +538,10 @@ async def purge_agent(agent_id: str, payload: RevokeSchema, db: AsyncSession = D
     await log_audit(
         db,
         actor_id=str(user.id),
+        actor_role=user.role,
         action="AGENT_PURGE",
+        tenant_id=agent.client_id,
+        target_type="user",
         target_id=agent_id,
         details=f"Agent {agent.email} completely purged: {n_results} result(s), {n_files} evidence file(s) destroyed."
     )
@@ -574,7 +594,10 @@ async def reactivate_agent(agent_id: str, payload: RevokeSchema, db: AsyncSessio
     await log_audit(
         db,
         actor_id=str(user.id),
+        actor_role=user.role,
         action="AGENT_REACTIVATION",
+        tenant_id=agent.client_id,
+        target_type="user",
         target_id=agent_id,
         details=f"Access restored for agent: {agent.email} (fresh signing key issued, password reset forced; history preserved)."
     )
@@ -640,7 +663,10 @@ async def factory_reset_system(payload: RevokeSchema, db: AsyncSession = Depends
     await log_audit(
         db,
         actor_id=str(user.id),
+        actor_role=user.role,
         action="FACTORY_RESET",
+        target_type="platform",
+        target_id="global",
         details="Full system wipe: elections, clients, agents, results, sessions and evidence."
     )
 
@@ -1193,6 +1219,12 @@ async def create_system_user(payload: SystemUserCreate, db: AsyncSession = Depen
     )
     db.add(new_user)
     await db.commit()
+    await log_audit(db, actor_id=str(user.id), actor_role=user.role,
+                    action="USER_CREATED",
+                    tenant_id=new_client_id,
+                    target_type="user", target_id=new_user.id,
+                    details=f"Operator account created: {payload.email} (role={payload.role})")
+    await db.commit()
     return {"status": "success", "id": new_user.id}
 
 @router.put("/system/users/{user_id}")
@@ -1217,6 +1249,14 @@ async def update_system_user(user_id: str, payload: SystemUserUpdate, db: AsyncS
         target.is_active = payload.is_active
 
     await db.commit()
+    changed = [k for k, v in (("full_name", payload.full_name), ("role", payload.role),
+                              ("is_active", payload.is_active)) if v is not None]
+    await log_audit(db, actor_id=str(user.id), actor_role=user.role,
+                    action="USER_UPDATED",
+                    tenant_id=target.client_id,
+                    target_type="user", target_id=target.id,
+                    details=f"Operator account updated: {target.email} (fields: {', '.join(changed)})")
+    await db.commit()
     return {"status": "success"}
 
 @router.delete("/system/users/{user_id}")
@@ -1231,6 +1271,11 @@ async def delete_system_user(user_id: str, db: AsyncSession = Depends(get_db), u
     # accounts must not be reachable from a client admin.
     if user.client_id is not None and target.client_id != user.client_id:
         raise HTTPException(status_code=404, detail="User not found")
+    await log_audit(db, actor_id=str(user.id), actor_role=user.role,
+                    action="USER_DELETED",
+                    tenant_id=target.client_id,
+                    target_type="user", target_id=target.id,
+                    details=f"Operator account deleted: {target.email} (role={target.role})")
     await db.delete(target)
     await db.commit()
     return {"status": "success"}
