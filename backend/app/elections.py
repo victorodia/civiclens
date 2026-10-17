@@ -141,6 +141,7 @@ async def create_client(
         raise HTTPException(409, f"A client named {name!r} already exists.")
     client = Client(name=name, contact_email=payload.contact_email, notes=payload.notes)
     db.add(client)
+    await db.flush()  # materialize client.id before it lands in the audit row
     await log_audit(db, actor_id=str(user.id), actor_role=user.role,
                     action="CLIENT_CREATE",
                     tenant_id=client.id,
@@ -358,6 +359,7 @@ async def create_election(
         party_c_name=payload.party_c_name or "Party C",
     )
     db.add(election)
+    await db.flush()  # materialize election.id before it lands in the audit row
     await log_audit(db, actor_id=str(user.id), actor_role=user.role,
                     action="ELECTION_CREATE",
                     tenant_id=election.client_id,

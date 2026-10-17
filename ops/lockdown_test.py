@@ -21,6 +21,9 @@ AGENT_EMAIL = f"cl-agent-{_run}@civiclens.io"
 _symbols = "#!@$%*-_=+"
 ADMIN_PW = secrets.token_urlsafe(18) + secrets.choice(_symbols)
 AGENT_PW = secrets.token_urlsafe(18) + secrets.choice(_symbols)
+TENANT_ADMIN_EMAIL = f'cl-tenant-{_run}@civiclens.io'
+TENANT_PW = secrets.token_urlsafe(18) + secrets.choice(_symbols)
+TENANT_ID = None
 FP = "MOCKED_PHONE_ID"
 OCCUPIED_PU = "DEL-04-10-011"
 
@@ -52,7 +55,11 @@ def call(method, path, body=None, headers=None, raw=None):
         req.add_header(k, v)
     try:
         with urllib.request.urlopen(req, data=data, timeout=30) as r:
-            return r.status, json.loads(r.read() or b"{}")
+            raw = r.read() or b"{}"
+            try:
+                return r.status, json.loads(raw)
+            except ValueError:
+                return r.status, raw.decode(errors="replace")
     except urllib.error.HTTPError as e:
         try:
             return e.code, json.loads(e.read() or b"{}")
@@ -68,9 +75,11 @@ def check(name, cond, detail):
 
 
 def sql(stmt):
-    subprocess.run(
+    r = subprocess.run(
         ["sudo", "docker", "exec", "civiclens-db", "psql", "-U", "civiclens_user",
-         "-d", "civiclens", "-c", stmt], check=True, capture_output=True)
+         "-d", "civiclens", "-c", stmt], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"SQL failed: {r.stderr.strip()} -- STMT: {stmt[:200]}")
 
 
 # ---------- setup: temporary admin account with a proper Argon2 hash ----------
@@ -129,6 +138,8 @@ try:
     check("wallet-balance no token -> 401", st == 401, f"got {st}")
     st, r = call("GET", "/admin/health")
     check("admin/health no token -> 401", st == 401, f"got {st}")
+    st, r = call("GET", "/admin/audit-logs")
+    check("audit-logs no token -> 401", st == 401, f"got {st}")
 
     # ---------- public read-only API (citizen portal) ----------
     # Must work with NO token, must return aggregates only, and the geo chain
@@ -165,6 +176,45 @@ try:
     states_list = r if states_ok else []
     check("geo/states admin -> 200", states_ok,
           f"got {st} states={len(r) if isinstance(r, list) else 0}")
+
+    # ---------- audit trail: hash-chained, tenant-scoped ----------
+    st, r = call("GET", "/admin/audit-logs?limit=5", headers=AH)
+    check("audit-logs admin -> 200 + chain tip",
+          st == 200 and bool(r.get("chain_tip")) and isinstance(r.get("rows"), list),
+          f"got {st} tip={'yes' if st == 200 and r.get('chain_tip') else 'NO'}")
+    st, r = call("GET", "/admin/audit-logs/verify", headers=AH)
+    check("audit verify platform -> valid", st == 200 and r.get("valid") is True,
+          f"got {st} valid={r.get('valid')}")
+    st, body = call("GET", "/admin/audit-logs/export?limit=10", headers=AH)
+    check("audit export -> CSV", st == 200 and isinstance(body, str) and body.startswith("seq,"),
+          f"got {st}")
+
+    # Tenant isolation: a client admin must see ONLY their institution's rows
+    st, r = call("POST", "/admin/clients", {"name": f"Lockdown Tenant {_run}"}, headers=AH)
+    TENANT_ID = r.get("id")
+    check("audit sandbox client -> 201", st == 201 and bool(TENANT_ID), f"got {st}")
+    h2 = subprocess.run(
+        ["sudo", "docker", "exec", "civiclens-backend", "python3", "-c",
+         "from passlib.context import CryptContext; "
+         "print(CryptContext(schemes=['argon2'],deprecated='auto').hash('" + TENANT_PW + "'))"],
+        capture_output=True, text=True, check=True).stdout.strip()
+    sql(f"INSERT INTO users (id,email,hashed_password,full_name,role,is_active,requires_password_reset,client_id) "
+        f"VALUES ('cl-tenant-admin-fixed-id-000000001','{TENANT_ADMIN_EMAIL}','{h2}','Tenant Admin','admin',true,false,'{TENANT_ID}') "
+        f"ON CONFLICT (id) DO UPDATE SET email=EXCLUDED.email, hashed_password=EXCLUDED.hashed_password, "
+        f"client_id=EXCLUDED.client_id, is_active=true, requires_password_reset=false;")
+    st, r = call("POST", "/auth/login", {"email": TENANT_ADMIN_EMAIL, "password": TENANT_PW})
+    tenant_tok = r.get("access_token")
+    check("audit tenant admin login", bool(tenant_tok), f"status={st}")
+    TH = {"Authorization": f"Bearer {tenant_tok}"} if tenant_tok else {}
+    st, r = call("GET", "/admin/audit-logs?limit=100", headers=TH)
+    rows = r.get("rows") if st == 200 else []
+    scope_ok = (st == 200 and r.get("scope") == "tenant"
+                and all(x.get("tenant_id") == TENANT_ID for x in rows))
+    check("audit tenant scope -> own rows only", scope_ok,
+          f"got {st} scope={r.get('scope')} rows={len(rows)}")
+    st, r = call("GET", "/admin/audit-logs/verify", headers=TH)
+    check("audit tenant verify -> valid content check", st == 200 and r.get("valid") is True,
+          f"got {st} valid={r.get('valid')}")
 
     # Sandbox election: the submit/check-in security checks below must bind
     # to a REAL election row (the GENERAL default no longer exists), scoped
@@ -237,6 +287,21 @@ try:
     st, r = call("GET", f"/admin/mfa/setup?email={ADMIN_EMAIL}", headers=GH)
     check("agent mfa/setup for other -> 403", st == 403, f"got {st}")
 
+    # ---------- audit trail: agent sees only its own activity ----------
+    st, r = call("GET", "/admin/agents", headers=AH)
+    agent_list = r if isinstance(r, list) else (r.get("agents") or [])
+    agent_row = next((a for a in agent_list if a.get("email") == AGENT_EMAIL), {})
+    AGENT_ID = agent_row.get("id")
+    st, r = call("GET", "/audit-logs/me?limit=50", headers=GH)
+    me_rows = r.get("rows") if st == 200 else []
+    check("agent audit-logs/me -> 200 own trail",
+          st == 200 and all(x.get("actor_id") == AGENT_ID for x in me_rows),
+          f"got {st} rows={len(me_rows)}")
+    st, r = call("GET", "/audit-logs/me", headers=AH)
+    check("admin blocked from agent audit trail -> 403", st == 403, f"got {st}")
+    st, r = call("GET", "/admin/audit-logs", headers=GH)
+    check("agent blocked from audit-logs -> 403", st == 403, f"got {st}")
+
     # ---------- mandatory per-agent payload signatures ----------
     st, r = call("POST", "/results/submit",
                  {"pu_code": OCCUPIED_PU, "agent_email": AGENT_EMAIL, "party_a_votes": 1,
@@ -298,13 +363,15 @@ finally:
     # audit entries all reference the temp users, and a plain DELETE FROM
     # users fails on those FKs — which is exactly how previous runs left the
     # fixed-id temp admin behind to break the next run's setup.
-    sql(f"DELETE FROM results WHERE agent_id IN (SELECT id FROM users WHERE email IN ('{ADMIN_EMAIL}','{AGENT_EMAIL}')); "
-        f"DELETE FROM agent_location_pings WHERE agent_id IN (SELECT id FROM users WHERE email IN ('{ADMIN_EMAIL}','{AGENT_EMAIL}')); "
-        f"DELETE FROM agent_checkins WHERE agent_id IN (SELECT id FROM users WHERE email IN ('{ADMIN_EMAIL}','{AGENT_EMAIL}')); "
-        f"DELETE FROM agent_assignments WHERE agent_id IN (SELECT id FROM users WHERE email IN ('{ADMIN_EMAIL}','{AGENT_EMAIL}')); "
-        f"DELETE FROM audit_logs WHERE actor_id IN (SELECT id FROM users WHERE email IN ('{ADMIN_EMAIL}','{AGENT_EMAIL}')); "
-        f"DELETE FROM users WHERE email IN ('{ADMIN_EMAIL}','{AGENT_EMAIL}');")
+    sql(f"DELETE FROM results WHERE agent_id IN (SELECT id FROM users WHERE email IN ('{ADMIN_EMAIL}','{AGENT_EMAIL}','{TENANT_ADMIN_EMAIL}')); "
+        f"DELETE FROM agent_location_pings WHERE agent_id IN (SELECT id FROM users WHERE email IN ('{ADMIN_EMAIL}','{AGENT_EMAIL}','{TENANT_ADMIN_EMAIL}')); "
+        f"DELETE FROM agent_checkins WHERE agent_id IN (SELECT id FROM users WHERE email IN ('{ADMIN_EMAIL}','{AGENT_EMAIL}','{TENANT_ADMIN_EMAIL}')); "
+        f"DELETE FROM agent_assignments WHERE agent_id IN (SELECT id FROM users WHERE email IN ('{ADMIN_EMAIL}','{AGENT_EMAIL}','{TENANT_ADMIN_EMAIL}')); "
+        f"DELETE FROM audit_logs WHERE actor_id IN (SELECT id FROM users WHERE email IN ('{ADMIN_EMAIL}','{AGENT_EMAIL}','{TENANT_ADMIN_EMAIL}')); "
+        f"DELETE FROM users WHERE email IN ('{ADMIN_EMAIL}','{AGENT_EMAIL}','{TENANT_ADMIN_EMAIL}');")
     if ELECTION_ID:
         sql(f"DELETE FROM election_polling_units WHERE election_id = '{ELECTION_ID}'; "
             f"DELETE FROM elections WHERE id = '{ELECTION_ID}';")
+    if TENANT_ID:
+        sql(f"DELETE FROM clients WHERE id = '{TENANT_ID}';")
     print("cleanup: temp accounts + sandbox election removed")

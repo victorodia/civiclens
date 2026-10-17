@@ -143,6 +143,9 @@ async def login(
                     details=f"Login {'under DURESS ' if is_under_duress else ''}for {email} (role={user.role})",
                     ip_address=client_ip,
                     device_fingerprint=device_fingerprint)
+    # The login path never wrote anything before, so there is no later
+    # commit to piggyback on — without this the audit row rolls back.
+    await db.commit()
 
     if user.requires_password_reset:
         return {
