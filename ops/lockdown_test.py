@@ -359,15 +359,17 @@ try:
     if failed:
         print("FAILED:", ", ".join(failed))
 finally:
-    # Delete dependent rows first: results, pings, check-ins, assignments and
-    # audit entries all reference the temp users, and a plain DELETE FROM
+    # Delete dependent rows first: results, pings, check-ins and
+    # assignments all reference the temp users, and a plain DELETE FROM
     # users fails on those FKs — which is exactly how previous runs left the
     # fixed-id temp admin behind to break the next run's setup.
+    # NOTE: audit_logs rows are deliberately NOT deleted. Deleting committed
+    # chain rows breaks the hash linkage for the next surviving row and
+    # fails /admin/audit-logs/verify. Dangling actor_ids are harmless.
     sql(f"DELETE FROM results WHERE agent_id IN (SELECT id FROM users WHERE email IN ('{ADMIN_EMAIL}','{AGENT_EMAIL}','{TENANT_ADMIN_EMAIL}')); "
         f"DELETE FROM agent_location_pings WHERE agent_id IN (SELECT id FROM users WHERE email IN ('{ADMIN_EMAIL}','{AGENT_EMAIL}','{TENANT_ADMIN_EMAIL}')); "
         f"DELETE FROM agent_checkins WHERE agent_id IN (SELECT id FROM users WHERE email IN ('{ADMIN_EMAIL}','{AGENT_EMAIL}','{TENANT_ADMIN_EMAIL}')); "
         f"DELETE FROM agent_assignments WHERE agent_id IN (SELECT id FROM users WHERE email IN ('{ADMIN_EMAIL}','{AGENT_EMAIL}','{TENANT_ADMIN_EMAIL}')); "
-        f"DELETE FROM audit_logs WHERE actor_id IN (SELECT id FROM users WHERE email IN ('{ADMIN_EMAIL}','{AGENT_EMAIL}','{TENANT_ADMIN_EMAIL}')); "
         f"DELETE FROM users WHERE email IN ('{ADMIN_EMAIL}','{AGENT_EMAIL}','{TENANT_ADMIN_EMAIL}');")
     if ELECTION_ID:
         sql(f"DELETE FROM election_polling_units WHERE election_id = '{ELECTION_ID}'; "
