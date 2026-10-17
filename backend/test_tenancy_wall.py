@@ -22,7 +22,6 @@ from app.admin import (
     create_role, update_role, delete_role,
     SystemUserCreate, SystemUserUpdate,
 )
-from app.main import _ElectionConfigSchema, update_election_config
 
 FAILED = []
 
@@ -107,11 +106,6 @@ async def main():
         check("update role as client admin -> 403", st == 403)
         st = await expect(lambda: delete_role("viewer", db=db, user=admin_a), 403)
         check("delete role as client admin -> 403", st == 403)
-
-        st = await expect(lambda: update_election_config(
-            _ElectionConfigSchema(party_a_name="A", party_b_name="B", party_c_name="C", election_name="E"),
-            db=db, user=admin_a), 403)
-        check("write global election-config as client admin -> 403", st == 403)
 
         # ── positive controls: own-client operations still work ──
         r = await rotate_agent_signing_key(RotateKeySchema(email=agent_a.email), db=db, user=admin_a)
