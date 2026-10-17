@@ -9,7 +9,7 @@ const emptyForm = { name: '', contact_email: '', notes: '' };
 // admins never see this page: the nav button is hidden and the API
 // endpoints return 403 for anyone with a client_id on their account.
 const Clients = () => {
-    const { showNotification } = useNotification();
+    const { showNotification, showDialog } = useNotification();
     const [clients, setClients] = useState([]);
     const [loading, setLoading] = useState(true);
     const [showCreate, setShowCreate] = useState(false);
@@ -90,7 +90,13 @@ const Clients = () => {
     };
 
     const remove = async (c) => {
-        if (!window.confirm(`Delete "${c.name}"? This cannot be undone.`)) return;
+        const ok = await showDialog({
+            title: 'Delete Institution',
+            message: `Delete "${c.name}"? This cannot be undone.`,
+            input: false,
+            danger: true
+        });
+        if (ok === null) return;
         try {
             const res = await fetch(`/admin/clients/${c.id}`, { method: 'DELETE' });
             const data = await res.json().catch(() => ({}));

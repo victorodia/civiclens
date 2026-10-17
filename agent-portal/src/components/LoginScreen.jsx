@@ -5,7 +5,7 @@ import { useNotification } from '../contexts/NotificationContext';
 import { clearAllData } from '../db/db';
 
 const LoginScreen = ({ onLoginSuccess, onRequireReset }) => {
-    const { showNotification } = useNotification();
+    const { showNotification, showDialog } = useNotification();
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
     const [signingKey, setSigningKey] = useState(() => localStorage.getItem('cl_signing_key') || '');
@@ -60,7 +60,13 @@ const LoginScreen = ({ onLoginSuccess, onRequireReset }) => {
 
 
     const handlePurge = async () => {
-        if (window.confirm("RESCUE ACTION: This will permanently delete all local data and fix potential app crashes. Proceed?")) {
+        const ok = await showDialog({
+            title: 'Rescue Action',
+            message: 'This will permanently delete all local data and fix potential app crashes. Proceed?',
+            input: false,
+            danger: true
+        });
+        if (ok !== null) {
             await clearAllData();
             window.location.reload();
         }

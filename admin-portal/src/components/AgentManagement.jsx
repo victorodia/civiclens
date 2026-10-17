@@ -217,7 +217,13 @@ const AgentManagement = () => {
     };
 
     const handleRotateKey = async (agentEmail) => {
-        if (!window.confirm(`Re-issue the device signing key for ${agentEmail}?\n\nThe current key stops working IMMEDIATELY. The agent must enter the new key at their next login.`)) return;
+        const ok = await showDialog({
+            title: 'Re-issue Signing Key',
+            message: `Re-issue the device signing key for ${agentEmail}?\n\nThe current key stops working IMMEDIATELY. The agent must enter the new key at their next login.`,
+            input: false,
+            danger: true
+        });
+        if (ok === null) return;
         try {
             const res = await fetch('/admin/agents/rotate-signing-key', {
                 method: 'POST',

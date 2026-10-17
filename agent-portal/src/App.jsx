@@ -8,6 +8,7 @@ import UserProfileScreen from './components/UserProfileScreen';
 import MyActivity from './components/MyActivity';
 import { NotificationProvider, useNotification } from './contexts/NotificationContext';
 import NotificationBanner from './components/NotificationBanner';
+import ConfirmDialog from './components/ConfirmDialog';
 import { Camera, UserCircle, Activity } from 'lucide-react';
 import { clearAllData, getPendingDrafts } from './db/db';
 
@@ -98,6 +99,51 @@ function LayoutShell({ children, activeView, setActiveView, onLogout, assignedPu
   );
 }
 
+// Wraps the authenticated shell INSIDE the NotificationProvider so the
+// styled confirm dialog can gate sign-out: App renders the provider, so
+// it cannot consume the dialog context directly.
+function AuthenticatedApp({ activeView, setPersistedActiveView, assignedPu, assignments, onSignOut }) {
+  const { showDialog } = useNotification();
+
+  const guardedLogout = async () => {
+    const drafts = await getPendingDrafts(assignedPu?.email);
+    if (drafts.length > 0) {
+      const ok = await showDialog({
+        title: 'Un-synced Results',
+        message: `WARNING: You have ${drafts.length} un-synced results.\n\nIf you sign out now, you MUST sign back into this exact device later to sync them.\n\nProceed with sign out?`,
+        input: false,
+        danger: true
+      });
+      if (ok === null) return;
+    }
+    onSignOut();
+  };
+
+  return (
+<LayoutShell
+            activeView={activeView}
+            setActiveView={setPersistedActiveView}
+            onLogout={guardedLogout}
+            assignedPu={assignedPu}
+          >
+            <div className="flex-1 flex flex-col">
+              {activeView === 'capture' && (
+                <div className="bg-white dark:bg-gray-900 rounded-3xl shadow-xl border border-gray-100 dark:border-gray-800 p-6">
+                  <div className="mb-6">
+                    <h2 className="text-xl font-black text-gray-900 dark:text-white uppercase tracking-tight">Agent Submission</h2>
+                    <p className="text-xs text-gray-400 font-bold uppercase tracking-wider">Field Data Capture</p>
+                  </div>
+                  <ResultCaptureForm assignedPu={assignedPu} assignments={assignments} />
+                </div>
+              )}
+
+              {activeView === 'profile' && <UserProfileScreen onLogout={guardedLogout} assignedPu={assignedPu} />}
+              {activeView === 'activity' && <MyActivity />}
+            </div>
+          </LayoutShell>
+  );
+}
+
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(() => {
     return localStorage.getItem('isAuthenticated') === 'true';
@@ -131,12 +177,8 @@ function App() {
   }, []);
 
   const handleLogout = async () => {
-    const drafts = await getPendingDrafts(assignedPu?.email);
-    if (drafts.length > 0) {
-        const proceed = window.confirm(`WARNING: You have ${drafts.length} un-synced results.\n\nIf you sign out now, you MUST sign back into this exact device later to sync them.\n\nProceed with sign out?`);
-        if (!proceed) return;
-    }
-
+    // The un-synced-drafts warning lives in AuthenticatedApp.guardedLogout,
+    // which runs inside the NotificationProvider and can show the dialog.
     // DO NOT clearAllData() here so offline sync queue remains intact
     setIsAuthenticated(false);
     setAssignedPu(null);
@@ -152,6 +194,7 @@ function App() {
     <ThemeProvider>
       <NotificationProvider>
         <NotificationBanner />
+        <ConfirmDialog />
 
         {!isAuthenticated && !isResetRequired && (
           <LoginScreen
@@ -175,27 +218,13 @@ function App() {
         )}
 
         {isAuthenticated && !isResetRequired && (
-          <LayoutShell
+          <AuthenticatedApp
             activeView={activeView}
-            setActiveView={setPersistedActiveView}
-            onLogout={handleLogout}
+            setPersistedActiveView={setPersistedActiveView}
             assignedPu={assignedPu}
-          >
-            <div className="flex-1 flex flex-col">
-              {activeView === 'capture' && (
-                <div className="bg-white dark:bg-gray-900 rounded-3xl shadow-xl border border-gray-100 dark:border-gray-800 p-6">
-                  <div className="mb-6">
-                    <h2 className="text-xl font-black text-gray-900 dark:text-white uppercase tracking-tight">Agent Submission</h2>
-                    <p className="text-xs text-gray-400 font-bold uppercase tracking-wider">Field Data Capture</p>
-                  </div>
-                  <ResultCaptureForm assignedPu={assignedPu} assignments={assignments} />
-                </div>
-              )}
-
-              {activeView === 'profile' && <UserProfileScreen onLogout={handleLogout} assignedPu={assignedPu} />}
-              {activeView === 'activity' && <MyActivity />}
-            </div>
-          </LayoutShell>
+            assignments={assignments}
+            onSignOut={handleLogout}
+          />
         )}
       </NotificationProvider>
     </ThemeProvider>

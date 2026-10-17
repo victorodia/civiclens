@@ -8,7 +8,7 @@ const UserProfileScreen = ({ assignedPu, onLogout }) => {
     const puCode = assignedPu?.pu_code || "Unknown";
     const profilePic = assignedPu?.profile_picture || null;
 
-    const { showNotification } = useNotification();
+    const { showNotification, showDialog } = useNotification();
     const [activeTab, setActiveTab] = useState('overview'); // overview, password
     const [loading, setLoading] = useState(false);
 
@@ -31,7 +31,13 @@ const UserProfileScreen = ({ assignedPu, onLogout }) => {
     };
 
     const handlePurge = async () => {
-        if (window.confirm("CRITICAL SECURITY ACTION: This will permanently delete all unsynced result drafts and local device settings. This CANNOT be undone. Proceed?")) {
+        const ok = await showDialog({
+            title: 'Critical Security Action',
+            message: 'This will permanently delete all unsynced result drafts and local device settings. This CANNOT be undone. Proceed?',
+            input: false,
+            danger: true
+        });
+        if (ok !== null) {
             await clearAllData();
             window.location.reload();
         }

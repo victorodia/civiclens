@@ -25,7 +25,7 @@ const RoleManagement = () => {
     const [roles, setRoles] = useState([]);
     const [isLoading, setIsLoading] = useState(true);
     const [isFormOpen, setIsFormOpen] = useState(false);
-    const { showNotification } = useNotification();
+    const { showNotification, showDialog } = useNotification();
 
     const [formData, setFormData] = useState({
         name: '',
@@ -101,9 +101,13 @@ const RoleManagement = () => {
             return;
         }
         
-        // Use standard browser confirm for simplicity since this is an admin tool,
-        // but normally we'd use the custom modal.
-        if (window.confirm(`Are you sure you want to delete the role '${roleName}'? Users with this role might lose access.`)) {
+        const ok = await showDialog({
+            title: 'Delete Role',
+            message: `Are you sure you want to delete the role '${roleName}'? Users with this role might lose access.`,
+            input: false,
+            danger: true
+        });
+        if (ok !== null) {
             try {
                 const res = await fetch(`/admin/system/roles/${roleName}`, {
                     method: 'DELETE'

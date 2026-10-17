@@ -16,9 +16,13 @@ const SecurityDialog = () => {
         }
     }, [dialog]);
 
+    // input === false renders a plain Confirm/Cancel dialog (no security
+    // key field) and resolves `true` on confirm, `null` on cancel.
+    const isConfirm = dialog?.input === false;
+
     const handleConfirm = (e) => {
         e.preventDefault();
-        closeDialog(inputValue);
+        closeDialog(isConfirm ? true : inputValue);
     };
 
     const handleCancel = () => {
@@ -50,17 +54,38 @@ const SecurityDialog = () => {
 
                         <div className="p-8 space-y-6">
                             <div className="flex flex-col items-center text-center space-y-3">
-                                <div className="bg-brand/10 p-3 rounded-2xl">
-                                    <ShieldAlert className="w-8 h-8 text-brand" />
+                                <div className={`p-3 rounded-2xl ${isConfirm ? 'bg-red-500/10' : 'bg-brand/10'}`}>
+                                    {isConfirm
+                                        ? <AlertTriangle className="w-8 h-8 text-red-500" />
+                                        : <ShieldAlert className="w-8 h-8 text-brand" />}
                                 </div>
                                 <h3 className="text-xl font-black text-gray-900 dark:text-white uppercase tracking-tight leading-tight">
                                     {dialog.title || 'Security Verification'}
                                 </h3>
-                                <p className="text-[10px] text-gray-500 font-bold leading-relaxed px-4 uppercase tracking-wider">
+                                <p className="text-[10px] text-gray-500 font-bold leading-relaxed px-4 uppercase tracking-wider whitespace-pre-line">
                                     {dialog.message}
                                 </p>
                             </div>
 
+                            {isConfirm ? (
+                                <div className="flex space-x-3 pt-2">
+                                    <button
+                                        type="button"
+                                        onClick={handleCancel}
+                                        className="flex-1 py-4 text-[10px] font-black uppercase tracking-widest text-gray-400 hover:text-gray-600 transition-colors"
+                                    >
+                                        Cancel
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => closeDialog(true)}
+                                        className={`flex-1 py-4 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest shadow-xl active:scale-95 transition-all flex items-center justify-center space-x-2 ${dialog.danger ? 'bg-red-500 shadow-red-500/20' : 'bg-brand shadow-brand/20'}`}
+                                    >
+                                        <CheckCircle className="w-3.5 h-3.5" />
+                                        <span>Confirm</span>
+                                    </button>
+                                </div>
+                            ) : (
                             <form onSubmit={handleConfirm} className="space-y-4">
                                 <div className="relative group">
                                     <div className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 group-focus-within:text-brand transition-colors">
@@ -100,6 +125,7 @@ const SecurityDialog = () => {
                                     </button>
                                 </div>
                             </form>
+                            )}
                         </div>
                     </motion.div>
                 </div>
