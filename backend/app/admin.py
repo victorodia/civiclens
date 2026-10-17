@@ -1189,7 +1189,8 @@ async def get_system_users(db: AsyncSession = Depends(get_db), user: User = Depe
     res = await db.execute(stmt)
     users = res.scalars().all()
     return [
-        {"id": u.id, "email": u.email, "full_name": u.full_name, "role": u.role, "is_active": u.is_active}
+        {"id": u.id, "email": u.email, "full_name": u.full_name, "role": u.role,
+         "is_active": u.is_active, "client_id": str(u.client_id) if u.client_id else None}
         for u in users
     ]
 

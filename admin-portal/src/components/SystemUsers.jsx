@@ -16,8 +16,16 @@ const SystemUsers = () => {
         email: '',
         full_name: '',
         password: '',
-        role: 'analyst'
+        role: 'analyst',
+        client_id: ''
     });
+    const [clients, setClients] = useState([]);
+    // Platform super-admins (no client_id on their own account) may bind a new
+    // account to an institution; client admins get their own institution
+    // automatically and never see the picker.
+    const isPlatformAdmin = (() => {
+        try { return !localStorage.getItem('adminClientId'); } catch (e) { return false; }
+    })();
     const [isSubmitting, setIsSubmitting] = useState(false);
 
     const requestDelete = (user) => {
@@ -102,6 +110,11 @@ const SystemUsers = () => {
     useEffect(() => {
         fetchUsers();
         fetchRoles();
+        if (isPlatformAdmin) {
+            fetch('/admin/clients').then(r => r.ok ? r.json() : null)
+                .then(d => setClients((d && d.clients) || []))
+                .catch(() => setClients([]));
+        }
     }, []);
 
     
@@ -139,13 +152,13 @@ const SystemUsers = () => {
             const res = await fetch('/admin/system/users', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(formData)
+                body: JSON.stringify({ ...formData, client_id: formData.client_id || null })
             });
             const data = await res.json();
             if (res.ok) {
                 showNotification('System user created successfully', 'success');
                 setShowForm(false);
-                setFormData({ email: '', full_name: '', password: '', role: 'analyst' });
+                setFormData({ email: '', full_name: '', password: '', role: 'analyst', client_id: '' });
                 fetchUsers();
         fetchRoles();
             } else {
@@ -212,6 +225,18 @@ const SystemUsers = () => {
                                                 ))}
 </select>
                             </div>
+                            {isPlatformAdmin && (
+                                <div className="space-y-1.5 sm:col-span-2">
+                                    <label className="text-[9px] font-black text-gray-400 uppercase tracking-widest">Institution</label>
+                                    <select value={formData.client_id} onChange={(e) => setFormData({...formData, client_id: e.target.value})} className="w-full px-4 py-3 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl outline-none focus:border-brand transition-colors text-sm font-bold tracking-wider text-gray-700 dark:text-gray-300">
+                                        <option value="">PLATFORM (super-admin — sees every institution)</option>
+                                        {clients.map(c => (
+                                            <option key={c.id} value={c.id}>{c.name}</option>
+                                        ))}
+                                    </select>
+                                    <p className="text-[9px] text-gray-400 font-bold uppercase tracking-wider">An account bound to an institution becomes that institution's admin — it sees only that institution's elections, agents, results and logs.</p>
+                                </div>
+                            )}
                         </div>
                         <div className="flex justify-end pt-2">
                             <button type="submit" disabled={isSubmitting} className="bg-gray-900 dark:bg-white text-white dark:text-black px-6 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest flex items-center space-x-2">
@@ -230,6 +255,7 @@ const SystemUsers = () => {
                                 <tr className="border-b border-gray-100 dark:border-gray-800 text-[10px] uppercase tracking-wider text-gray-400 font-black">
                                     <th className="py-3 px-4">User</th>
                                     <th className="py-3 px-4">Role</th>
+                                    {isPlatformAdmin && <th className="py-3 px-4">Institution</th>}
                                     <th className="py-3 px-4">Status</th>
                                     <th className="py-3 px-4 text-right">Actions</th>
                                 </tr>
@@ -254,6 +280,13 @@ const SystemUsers = () => {
                                             </select>
 
                                         </td>
+                                        {isPlatformAdmin && (
+                                            <td className="py-3 px-4">
+                                                <span className={`inline-block px-2 py-1 rounded-md text-[9px] uppercase tracking-wider font-bold ${user.client_id ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400' : 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400'}`}>
+                                                    {user.client_id ? (clients.find(c => c.id === user.client_id)?.name || 'Institution') : 'Platform'}
+                                                </span>
+                                            </td>
+                                        )}
                                         <td className="py-3 px-4">
                                             <div className="flex items-center space-x-2">
                                                 <div className={`w-2 h-2 rounded-full ${user.is_active ? 'bg-green-500' : 'bg-red-500'}`}></div>
@@ -273,7 +306,7 @@ const SystemUsers = () => {
                                     </tr>
                                 ))}
                                 {users.length === 0 && (
-                                    <tr><td colSpan="3" className="py-6 text-center text-gray-500 text-xs font-bold uppercase tracking-widest">No additional system users found</td></tr>
+                                    <tr><td colSpan={isPlatformAdmin ? "5" : "4"} className="py-6 text-center text-gray-500 text-xs font-bold uppercase tracking-widest">No additional system users found</td></tr>
                                 )}
                             </tbody>
                         </table>
