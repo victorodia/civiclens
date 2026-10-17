@@ -398,7 +398,7 @@ function App() {
           <SecurityDialog />
           <PasswordResetScreen
             email={resetEmail}
-            onComplete={() => { setIsResetRequired(false); setIsAuthenticated(false); }}
+            onComplete={() => { localStorage.removeItem('adminToken'); setIsResetRequired(false); setIsAuthenticated(false); }}
           />
         </NotificationProvider>
       </ThemeProvider>

@@ -521,6 +521,17 @@ async def finalize_security_initialization(payload: SecurityInitializationSchema
 
     await db.commit()
 
+    # Issue a short-lived initialization token so the just-initialized account
+    # can complete MFA enrollment (/admin/mfa/setup + /admin/mfa/verify) without
+    # a prior login session. The bootstrap window closes above (requires_password_reset
+    # cleared), so this token can never be minted again for the account.
+    from datetime import timedelta
+    from .security import create_access_token
+    init_token = create_access_token(
+        data={"sub": str(user.id), "role": user.role},
+        expires_delta=timedelta(minutes=15),
+    )
+
     await log_audit(db, actor_id=str(user.id), actor_role=user.role,
                     action="PASSWORD_INITIALIZED",
                     tenant_id=getattr(user, "client_id", None),
@@ -530,5 +541,6 @@ async def finalize_security_initialization(payload: SecurityInitializationSchema
 
     return {
         "status": "success",
-        "message": "Security credentials fully initialized. Temporary password has been expired."
+        "message": "Security credentials fully initialized. Temporary password has been expired.",
+        "access_token": init_token
     }

@@ -51,6 +51,9 @@ const PasswordResetScreen = ({ email, onComplete }) => {
             if (!res.ok) throw new Error(data.detail || "Security initialization failed.");
 
             showNotification("Passwords updated. Proceeding to MFA Setup.", "success");
+
+            // Init token lets the next MFA calls authenticate without a prior login
+            if (data.access_token) localStorage.setItem('adminToken', data.access_token);
             
             // Now fetch MFA setup data
             const mfaRes = await fetch(`/admin/mfa/setup?email=${encodeURIComponent(email)}`);
