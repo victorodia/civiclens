@@ -3,7 +3,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 
 from .db import get_db
-from .security import check_login_attempt, create_access_token, check_rate_limit, get_current_user, log_audit
+from .security import (
+    check_login_attempt, create_access_token, check_login_rate_limits,
+    record_login_failure, clear_login_failures, get_timing_dummy_hash,
+    get_current_user, log_audit,
+)
 # from .models import User  # We would import this in a finalized system
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -25,16 +29,15 @@ async def login(
     email = payload.email
     password = payload.password
     device_fingerprint = payload.device_fingerprint
-    client_ip = request.client.host if request.client else None
+    real_ip = request.client.host if request.client else None
     """
-    Highly secure login endpoint. 
+    Highly secure login endpoint.
     """
-    # 0. Anti-Brute Force Protection
-    client_ip = email # Use email as a proxy for rate limiting buckets in MVP
-    if not check_rate_limit(client_ip):
+    # 0. Anti-Brute Force Protection — per-email AND per-IP buckets (Redis).
+    if not await check_login_rate_limits(email, real_ip):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many login attempts. High-security lockout active for 60 seconds."
+            detail="Too many failed attempts. Try again later."
         )
     
     # 1. Database Lookup (with geographic hierarchy join)
@@ -56,9 +59,14 @@ async def login(
     row = res.first()
     
     if not row:
+        # Timing equalizer: spend the same Argon2 work as a real verify so
+        # account existence cannot be detected by response time.
+        from .security import pwd_context as _pwd_ctx
+        _pwd_ctx.verify(password, get_timing_dummy_hash())
+        await record_login_failure(email, real_ip)
         await log_audit(db, action="LOGIN_FAILED",
                         details=f"Unknown email attempted login: {email}",
-                        ip_address=client_ip)
+                        ip_address=real_ip)
         await db.commit()
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
@@ -70,7 +78,7 @@ async def login(
                         tenant_id=getattr(user, "client_id", None),
                         target_type="user", target_id=str(user.id),
                         details=f"Deactivated account attempted login: {email}",
-                        ip_address=client_ip)
+                        ip_address=real_ip)
         await db.commit()
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account has been deactivated. Contact the system administrator.")
 
@@ -81,7 +89,7 @@ async def login(
                         tenant_id=getattr(user, "client_id", None),
                         target_type="user", target_id=str(user.id),
                         details=f"Login rejected: unrecognized device for {email}",
-                        ip_address=client_ip,
+                        ip_address=real_ip,
                         device_fingerprint=device_fingerprint)
         await db.commit()
         raise HTTPException(
@@ -98,15 +106,20 @@ async def login(
     
     if not is_authenticated:
         print(f"[AUTH] Failed login attempt for {email}")
+        await record_login_failure(email, real_ip)
         await log_audit(db, actor_id=str(user.id), actor_role=user.role,
                         action="LOGIN_FAILED",
                         tenant_id=getattr(user, "client_id", None),
                         target_type="user", target_id=str(user.id),
                         details=f"Failed password for {email}",
-                        ip_address=client_ip,
+                        ip_address=real_ip,
                         device_fingerprint=device_fingerprint)
         await db.commit()
         raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    # Correct password: clear the email lockout bucket so a few typos can
+    # never lock a legitimate agent out of election day.
+    await clear_login_failures(email)
 
     # 3.5 MFA Challenge (TOTP)
     if user.is_2fa_enabled:
@@ -125,7 +138,7 @@ async def login(
                             tenant_id=getattr(user, "client_id", None),
                             target_type="user", target_id=str(user.id),
                             details=f"Invalid or expired MFA token at login for {email}",
-                            ip_address=client_ip)
+                            ip_address=real_ip)
             await db.commit()
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -141,7 +154,7 @@ async def login(
                     tenant_id=getattr(user, "client_id", None),
                     target_type="user", target_id=str(user.id),
                     details=f"Login {'under DURESS ' if is_under_duress else ''}for {email} (role={user.role})",
-                    ip_address=client_ip,
+                    ip_address=real_ip,
                     device_fingerprint=device_fingerprint)
     # The login path never wrote anything before, so there is no later
     # commit to piggyback on — without this the audit row rolls back.

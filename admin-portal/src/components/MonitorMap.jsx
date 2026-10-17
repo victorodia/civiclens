@@ -11,6 +11,7 @@ const STATUS = {
     on_site:      { color: '#10b981', label: 'Arrived — in perimeter' },
     out_of_fence: { color: '#f97316', label: 'Arrived — outside fence' },
     submitted:    { color: '#a855f7', label: 'Result submitted' },
+    no_anchor:    { color: '#eab308', label: 'Agent assigned — no INEC anchor' },
 };
 
 const NIGERIA_BOUNDS = [[4.0, 2.5], [14.2, 14.9]];

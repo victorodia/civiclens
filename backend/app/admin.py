@@ -1517,12 +1517,30 @@ async def get_result_presence_trail(
         except (TypeError, ValueError):
             anchor = None
 
+    # Geofence verdict: what can the chain actually prove about presence?
+    # ok | outside | unverifiable_no_anchor | unverifiable_no_gps
+    geofence_verdict = "unverifiable_no_anchor"
+    checkin_distance_m = None
+    if anchor and agent is not None and agent.check_in_lat is not None and agent.check_in_lng is not None:
+        import math as _m
+        _rlat1, _rlat2 = _m.radians(float(agent.check_in_lat)), _m.radians(anchor["lat"])
+        _dlat = _m.radians(anchor["lat"] - float(agent.check_in_lat))
+        _dlng = _m.radians(anchor["lng"] - float(agent.check_in_lng))
+        _a = _m.sin(_dlat / 2) ** 2 + _m.cos(_rlat1) * _m.cos(_rlat2) * _m.sin(_dlng / 2) ** 2
+        checkin_distance_m = 2 * 6371000 * _m.asin(_m.sqrt(_a))
+        geofence_verdict = "ok" if checkin_distance_m <= _geofence_radius() else "outside"
+    elif agent is not None and agent.check_in_lat is None:
+        geofence_verdict = "unverifiable_no_gps"
+
     return {
         "result_id": result.id,
         "pu_code": pu.pu_code if pu else None,
         "pu_name": pu.name if pu else None,
         "agent_email": agent.email if agent else None,
         "gps_trail_flag": result.gps_trail_flag,
+        "geofence_verdict": geofence_verdict,
+        "checkin_distance_m": checkin_distance_m,
+        "has_anchor": anchor is not None,
         "anchor": anchor,
         "geofence_radius_m": _geofence_radius(),
         "check_in": ({
@@ -1599,7 +1617,9 @@ async def get_monitor_map(
         # Optional state/LGA focus narrows within the scope. ──
         agent_rows = (await db.execute(_text("""
             SELECT pu.pu_code, pu.name,
-                   pu.expected_latitude::float AS lat, pu.expected_longitude::float AS lng,
+                   (pu.expected_latitude IS NOT NULL) AS has_anchor,
+                   COALESCE(pu.expected_latitude::float, u.check_in_lat) AS lat,
+                   COALESCE(pu.expected_longitude::float, u.check_in_lng) AS lng,
                    (ci.id IS NOT NULL) AS is_on_site,
                    ci.checked_in_at AS last_check_in,
                    (r.id IS NOT NULL) AS submitted,
@@ -1622,16 +1642,18 @@ async def get_monitor_map(
                 WHERE c.agent_id = u.id AND c.election_id = sc.election_id AND c.is_active
                 ORDER BY checked_in_at DESC LIMIT 1
             ) ci ON true
-            WHERE sc.election_id = :eid AND pu.expected_latitude IS NOT NULL
+            WHERE sc.election_id = :eid
               AND (CAST(:sid AS varchar) IS NULL OR s.id = :sid)
               AND (CAST(:lid AS varchar) IS NULL OR l.id = :lid)
         """), {"eid": election_id, "sid": state_id, "lid": lga_id})).all()
 
         markers = []
-        counters = {"assigned": 0, "on_site": 0, "out_of_fence": 0, "submitted": 0}
-        for pu_code, name, lat, lng, is_on_site, last_check_in, submitted, latest_outside in agent_rows:
+        counters = {"assigned": 0, "on_site": 0, "out_of_fence": 0, "submitted": 0, "no_anchor": 0}
+        for pu_code, name, has_anchor, lat, lng, is_on_site, last_check_in, submitted, latest_outside in agent_rows:
             if submitted:
                 status = "submitted"
+            elif not has_anchor:
+                status = "no_anchor"
             elif not is_on_site or last_check_in is None:
                 status = "assigned"
             elif latest_outside is True:
@@ -1639,8 +1661,10 @@ async def get_monitor_map(
             else:
                 status = "on_site"
             counters[status] += 1
+            if lat is None or lng is None:
+                continue  # no anchor and no check-in fix yet — nothing to plot
             markers.append({"pu_code": pu_code, "name": name, "lat": lat, "lng": lng,
-                            "status": status})
+                            "status": status, "has_anchor": bool(has_anchor)})
 
         cluster_rows = (await db.execute(_text("""
             SELECT s.name AS state, l.name AS lga,
@@ -1689,7 +1713,9 @@ async def get_monitor_map(
     # Agent-carrying PUs with live status
     agent_rows = (await db.execute(_text("""
         SELECT pu.pu_code, pu.name,
-               pu.expected_latitude::float AS lat, pu.expected_longitude::float AS lng,
+               (pu.expected_latitude IS NOT NULL) AS has_anchor,
+               COALESCE(pu.expected_latitude::float, u.check_in_lat) AS lat,
+               COALESCE(pu.expected_longitude::float, u.check_in_lng) AS lng,
                u.is_on_site, u.last_check_in,
                (r.id IS NOT NULL) AS submitted,
                lp.outside_geofence AS latest_outside
@@ -1703,16 +1729,17 @@ async def get_monitor_map(
             SELECT outside_geofence FROM agent_location_pings p
             WHERE p.agent_id = u.id ORDER BY recorded_at DESC LIMIT 1
         ) lp ON true
-        WHERE pu.expected_latitude IS NOT NULL
-          AND (CAST(:sid AS varchar) IS NULL OR s.id = :sid)
+        WHERE (CAST(:sid AS varchar) IS NULL OR s.id = :sid)
           AND (CAST(:lid AS varchar) IS NULL OR l.id = :lid)
     """), {"sid": state_id, "lid": lga_id})).all()
 
     markers = []
-    counters = {"assigned": 0, "on_site": 0, "out_of_fence": 0, "submitted": 0}
-    for pu_code, name, lat, lng, is_on_site, last_check_in, submitted, latest_outside in agent_rows:
+    counters = {"assigned": 0, "on_site": 0, "out_of_fence": 0, "submitted": 0, "no_anchor": 0}
+    for pu_code, name, has_anchor, lat, lng, is_on_site, last_check_in, submitted, latest_outside in agent_rows:
         if submitted:
             status = "submitted"
+        elif not has_anchor:
+            status = "no_anchor"
         elif not is_on_site or last_check_in is None:
             status = "assigned"
         elif latest_outside is True:
@@ -1720,8 +1747,10 @@ async def get_monitor_map(
         else:
             status = "on_site"
         counters[status] += 1
+        if lat is None or lng is None:
+            continue  # no anchor and no check-in fix yet — nothing to plot
         markers.append({"pu_code": pu_code, "name": name, "lat": lat, "lng": lng,
-                        "status": status})
+                        "status": status, "has_anchor": bool(has_anchor)})
 
     # Unassigned PUs aggregated to LGA bubbles
     cluster_rows = (await db.execute(_text("""

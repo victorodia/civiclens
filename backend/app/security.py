@@ -14,25 +14,104 @@ SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "ultra_secure_super_secret_dev_key
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 12 # 12 hour shifts for field agents
 
-# Mock Redis Rate Limiter (In Prod, use 'slowapi' + Redis)
-login_attempts = {}
+# Login brute-force protection: Redis-backed failure counters with an
+# in-memory per-process fallback. Two buckets per attempt:
+#   login:email:{email} -> 8 failures / 10 min (lockout target)
+#   login:ip:{ip}       -> 30 failures / 5 min  (rotating-email defence)
+# Only FAILURES count; a successful login clears the email bucket so a
+# legitimate user who typos a few times is never locked out.
+import os as _rl_os
+REDIS_URL = _rl_os.environ.get("REDIS_URL", "")
+_EMAIL_FAIL_LIMIT = 8
+_EMAIL_FAIL_WINDOW = 600
+_IP_FAIL_LIMIT = 30
+_IP_FAIL_WINDOW = 300
 
-def check_rate_limit(client_ip: str) -> bool:
-    """
-    Prevents brute-force attacks. 
-    Limits to 20 attempts per minute per IP.
-    """
+# In-memory fallback (per gunicorn worker) when Redis is unreachable.
+_mem_fails: dict = {}
+
+
+async def _redis_client():
+    import redis.asyncio as aioredis
+    return aioredis.from_url(REDIS_URL, socket_timeout=3, socket_connect_timeout=3)
+
+
+async def check_login_rate_limits(email: str, ip: str = None) -> bool:
+    """True = attempt allowed. Enforces both buckets."""
+    key_email = f"login:email:{email.lower()}"
+    key_ip = f"login:ip:{ip}" if ip else None
+    try:
+        r = await _redis_client()
+        try:
+            efails = int(await r.get(key_email) or 0)
+            if efails >= _EMAIL_FAIL_LIMIT:
+                return False
+            if key_ip:
+                ifails = int(await r.get(key_ip) or 0)
+                if ifails >= _IP_FAIL_LIMIT:
+                    return False
+        finally:
+            await r.close()
+        return True
+    except Exception:
+        now = datetime.utcnow()
+        for key, limit, window in ((key_email, _EMAIL_FAIL_LIMIT, _EMAIL_FAIL_WINDOW),
+                                   (key_ip, _IP_FAIL_LIMIT, _IP_FAIL_WINDOW)):
+            if not key:
+                continue
+            stamps = [t for t in _mem_fails.get(key, []) if now - t < timedelta(seconds=window)]
+            if len(stamps) >= limit:
+                return False
+        return True
+
+
+async def record_login_failure(email: str, ip: str = None) -> None:
+    """Count a failed password/identity against both buckets."""
+    key_email = f"login:email:{email.lower()}"
+    key_ip = f"login:ip:{ip}" if ip else None
+    try:
+        r = await _redis_client()
+        try:
+            for key in (key_email, key_ip):
+                if not key:
+                    continue
+                n = await r.incr(key)
+                if n == 1:
+                    await r.expire(key, _EMAIL_FAIL_WINDOW if key == key_email else _IP_FAIL_WINDOW)
+        finally:
+            await r.close()
+        return
+    except Exception:
+        pass
     now = datetime.utcnow()
-    attempts = login_attempts.get(client_ip, [])
-    # Filter attempts in the last 60 seconds
-    attempts = [a for a in attempts if now - a < timedelta(seconds=60)]
-    
-    if len(attempts) >= 20:
-        return False
-        
-    attempts.append(now)
-    login_attempts[client_ip] = attempts
-    return True
+    for key in (key_email, key_ip):
+        if key:
+            _mem_fails.setdefault(key, []).append(now)
+
+
+async def clear_login_failures(email: str) -> None:
+    """A correct password wipes the email bucket (typos must not lock out)."""
+    key_email = f"login:email:{email.lower()}"
+    try:
+        r = await _redis_client()
+        try:
+            await r.delete(key_email)
+        finally:
+            await r.close()
+    except Exception:
+        pass
+    _mem_fails.pop(key_email, None)
+
+
+# Timing equalizer: verifying against this hash costs the same Argon2 work as
+# a real verify, so "account exists" cannot be detected by response time.
+_TIMING_DUMMY_HASH = None
+
+def get_timing_dummy_hash() -> str:
+    global _TIMING_DUMMY_HASH
+    if _TIMING_DUMMY_HASH is None:
+        _TIMING_DUMMY_HASH = pwd_context.hash("civiclens-timing-equalizer")
+    return _TIMING_DUMMY_HASH
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verifies standard matching password"""
