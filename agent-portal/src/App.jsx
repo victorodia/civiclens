@@ -5,9 +5,10 @@ import SyncManager from './components/SyncManager';
 import LoginScreen from './components/LoginScreen';
 import PasswordResetScreen from './components/PasswordResetScreen';
 import UserProfileScreen from './components/UserProfileScreen';
+import MyActivity from './components/MyActivity';
 import { NotificationProvider, useNotification } from './contexts/NotificationContext';
 import NotificationBanner from './components/NotificationBanner';
-import { Camera, UserCircle } from 'lucide-react';
+import { Camera, UserCircle, Activity } from 'lucide-react';
 import { clearAllData, getPendingDrafts } from './db/db';
 
 function LayoutShell({ children, activeView, setActiveView, onLogout, assignedPu }) {
@@ -74,6 +75,14 @@ function LayoutShell({ children, activeView, setActiveView, onLogout, assignedPu
           >
             <Camera className="w-5 h-5 mb-1" />
             <span className="text-[9px] font-black uppercase tracking-widest">Capture</span>
+          </button>
+
+          <button
+            onClick={() => setActiveView('activity')}
+            className={`flex flex-col items-center justify-center w-full h-full transition-colors ${activeView === 'activity' ? 'text-brand' : 'text-gray-400'}`}
+          >
+            <Activity className="w-5 h-5 mb-1" />
+            <span className="text-[9px] font-black uppercase tracking-widest">Activity</span>
           </button>
 
           <button
@@ -184,6 +193,7 @@ function App() {
               )}
 
               {activeView === 'profile' && <UserProfileScreen onLogout={handleLogout} assignedPu={assignedPu} />}
+              {activeView === 'activity' && <MyActivity />}
             </div>
           </LayoutShell>
         )}
