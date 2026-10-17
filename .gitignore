@@ -12,3 +12,5 @@ agent-portal/public/models/
 backend/app/static/uploads/
 backend_logs.txt
 build.log
+deploy/gateway_nginx.rendered.conf
+.env

@@ -1,0 +1,9 @@
+# Development/test overlay — docker compose picks this up AUTOMATICALLY when
+# no -f flags are given (the test VM). Production uses
+# -f docker-compose.yml -f docker-compose.prod.yml instead, so this file
+# never applies there.
+services:
+  gateway:
+    ports:
+      - "80:80"
+      - "443:443"

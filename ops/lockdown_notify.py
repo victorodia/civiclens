@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Send a CivicLens watchdog alert email.
 
-Credentials come from ~/.watchdown_smtp.env style env file (sourced by the
-caller) or existing environment — never from argv, so they stay out of
-process listings. Usage: lockdown_notify.py "subject" "body"
+Credentials come from the watchdog SMTP env file (sourced by the caller)
+or existing environment — never from argv, so they stay out of process
+listings. Usage: lockdown_notify.py "subject" "body"
 """
 import os
 import smtplib

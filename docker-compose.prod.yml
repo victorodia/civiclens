@@ -1,0 +1,93 @@
+# Production overrides — layered on top of docker-compose.yml:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# deploy/bootstrap.sh sets STACK_NAME / DATA_ROOT / HTTP_PORT / HTTPS_PORT.
+# Everything else here is production hardening that is safe on any host.
+
+services:
+  db:
+    container_name: ${STACK_NAME:-civiclens}-db
+    mem_limit: 1.5g
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U civiclens_user -d civiclens || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "3" }
+
+  redis:
+    container_name: ${STACK_NAME:-civiclens}-redis
+    mem_limit: 256m
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "2" }
+
+  backend:
+    container_name: ${STACK_NAME:-civiclens}-backend
+    mem_limit: 1.5g
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request;urllib.request.urlopen('http://localhost:8001/health',timeout=5)\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "3" }
+
+  frontend-admin:
+    container_name: ${STACK_NAME:-civiclens}-admin
+    mem_limit: 128m
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "2" }
+
+  frontend-agent:
+    container_name: ${STACK_NAME:-civiclens}-agent
+    mem_limit: 128m
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "2" }
+
+  frontend-citizen:
+    container_name: ${STACK_NAME:-civiclens}-citizen
+    mem_limit: 128m
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "2" }
+
+  gateway:
+    container_name: ${STACK_NAME:-civiclens}-gateway
+    mem_limit: 128m
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    # Ship the hardened config from the repo instead of baking it into the
+    # image — gateway changes deploy with git, not rebuilds.
+    volumes:
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - ./deploy/gateway_nginx.rendered.conf:/etc/nginx/conf.d/default.conf:ro
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/ >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
