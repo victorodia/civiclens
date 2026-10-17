@@ -8,6 +8,7 @@ import AgentManagement from './components/AgentManagement';
 import WorkforceMonitor from './components/WorkforceMonitor';
 import MonitorMap from './components/MonitorMap';
 import CoverageAudit from './components/CoverageAudit';
+import AuditLogs from './components/AuditLogs';
 import UserProfileScreen from './components/UserProfileScreen';
 import ElectionConfig from './components/ElectionConfig';
 import ResultsFeed from './components/ResultsFeed';
@@ -223,6 +224,14 @@ function LayoutShell({ children, activeView, setActiveView, onLogout, walletStat
             <span className="text-[9px] font-black uppercase tracking-widest">Audit</span>
           </button> }
 
+          { hasPerm('view_audit_logs') && <button
+            onClick={() => setActiveView('logs')}
+            className={`flex flex-col items-center justify-center w-full h-full transition-colors ${activeView === 'logs' ? 'text-brand' : 'text-gray-400'}`}
+          >
+            <FileText className="w-5 h-5 mb-1" />
+            <span className="text-[9px] font-black uppercase tracking-widest">Logs</span>
+          </button> }
+
           {/* ── HOUSEKEEPING: system config -> personal profile ── */}
           { (hasPerm("trigger_factory_reset") || hasPerm("view_system_users")) && <button
             onClick={() => setActiveView('settings')}
@@ -424,6 +433,8 @@ function App() {
         return <Elections setActiveView={setPersistedActiveView} />;
       case 'audit':
         return <CoverageAudit setActiveView={setPersistedActiveView} />;
+      case 'logs':
+        return <AuditLogs />;
       case 'profile':
         return <UserProfileScreen onLogout={handleLogout} />;
       case 'settings':
