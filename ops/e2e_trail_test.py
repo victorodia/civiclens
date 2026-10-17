@@ -187,10 +187,8 @@ for t, e, p in ((rid1, AGENT1, pu1), (rid2, AGENT2, pu2)):
     if t:
         sql(f"DELETE FROM results WHERE id = '{t}'")
     sql(f"DELETE FROM agent_location_pings WHERE agent_id IN (SELECT id FROM users WHERE email = '{e}')")
-    sql(f"DELETE FROM audit_logs WHERE actor_id IN (SELECT id FROM users WHERE email = '{e}')")
     sql(f"DELETE FROM users WHERE email = '{e}'")
 sql(f"DELETE FROM users WHERE email = '{ADMIN_EMAIL}'")
-sql(f"DELETE FROM audit_logs WHERE actor_id = '{ADMIN_ID}'")
 print("cleanup: test accounts, results, pings removed", flush=True)
 
 print(f"\nRESULT: {len(passed)} passed, {len(failed)} failed")
