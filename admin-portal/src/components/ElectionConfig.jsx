@@ -15,6 +15,11 @@ const ElectionConfig = () => {
     });
     const [isLoading, setIsLoading] = useState(true);
     const [isSaving, setIsSaving] = useState(false);
+    // The factory-reset danger zone is platform-only. Client admins are
+    // rejected by the API too, but the control must not even render for them.
+    const isPlatformAdmin = (() => {
+        try { return !localStorage.getItem('adminClientId'); } catch (e) { return false; }
+    })();
 
     useEffect(() => {
         fetchConfig();
@@ -222,12 +227,14 @@ const ElectionConfig = () => {
                 </div>
             </div>
 
-            {/* User Management Module */}
-            <RoleManagement />
+            {/* User Management Module — global roles; platform admins only.
+                The API already rejects client admins with 403. */}
+            {isPlatformAdmin && <RoleManagement />}
             <div className="h-12"></div>
             <SystemUsers />
 
-            {/* Danger Zone */}
+            {/* Danger Zone — platform super-admins only */}
+            {isPlatformAdmin && (
             <div className="bg-red-50 dark:bg-red-950/20 p-6 rounded-3xl border border-red-200 dark:border-red-900/30 shadow-xl overflow-hidden relative group mt-6">
                 <div className="absolute -right-4 -top-4 opacity-5 group-hover:opacity-10 transition-opacity">
                     <ShieldAlert className="w-32 h-32 text-red-600" />
@@ -259,6 +266,7 @@ const ElectionConfig = () => {
                     <span>Initiate Factory Reset</span>
                 </button>
             </div>
+            )}
         </div>
     );
 };
