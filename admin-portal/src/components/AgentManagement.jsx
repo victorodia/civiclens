@@ -166,6 +166,21 @@ const AgentManagement = () => {
         if (!selectedElection) return showNotification("Pick the election this agent is accredited for first.", "warning");
         if (!selectedPu) return showNotification("Please select a Polling Unit first.", "warning");
         if (isPlatformAdmin && !selectedClient) return showNotification("Pick the institution this agent belongs to.", "warning");
+
+        // Consequence check before any account is created or accredited:
+        // summarize exactly what will happen and require an explicit yes.
+        const electionLabel = (elections.find(x => x.id === selectedElection) || {}).name || 'the selected election';
+        const puLabel = (pus.find(x => x.id === selectedPu) || {}).name || 'the selected polling unit';
+        const clientLabel = isPlatformAdmin
+            ? ` under ${(clients.find(x => x.id === selectedClient) || {}).name || 'the selected institution'}`
+            : '';
+        const confirmed = await showDialog({
+            title: 'Provision Agent',
+            message: `Create agent ${newAgentEmail.trim()}${clientLabel}?\n\nElection: ${electionLabel}\nPolling unit: ${puLabel}\n\nIf this email already belongs to an agent, the election is added to that agent instead — no new password is issued.`,
+            input: false,
+        });
+        if (confirmed === null) return;
+
         setIsProvisioning(true);
         setProvisionedCreds(null);
 
