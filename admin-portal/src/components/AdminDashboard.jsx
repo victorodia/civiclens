@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, PieChart, Pie } from 'recharts';
 import { ShieldCheck, TrendingUp, Users, Map, Clock, AlertTriangle, FileText } from 'lucide-react';
 import { motion } from 'framer-motion';
@@ -110,10 +110,15 @@ const AdminDashboard = ({ setActiveView }) => {
         }
     };
 
+    // Monotonic counter so a slow, out-of-date collation response (from a
+    // previously selected election) can never overwrite fresher state.
+    const statsSeq = useRef(0);
+
     const fetchStats = async () => {
         // No election focus, no stats: cross-election aggregates mix
         // different party slates and mislead every client.
         if (!selectedElectionId) return;
+        const seq = ++statsSeq.current;
         try {
             const query = new URLSearchParams();
             if (filters.state) query.append('state_id', filters.state);
@@ -125,6 +130,7 @@ const AdminDashboard = ({ setActiveView }) => {
             const response = await fetch(`/admin/stats/collation?${query.toString()}`);
             if (response.ok) {
                 const data = await response.json();
+                if (seq !== statsSeq.current) return; // superseded by a newer request
                 setStats(data);
                 // A focused stats response carries the race's own party
                 // labels — prefer them over any stale/global config.
@@ -347,8 +353,8 @@ const AdminDashboard = ({ setActiveView }) => {
                 </div>
 
                 <div className="mt-4 grid grid-cols-3 gap-2">
-                    {chartData.map((party) => (
-                        <div key={party.name} className="text-center">
+                    {chartData.map((party, index) => (
+                        <div key={`${party.name}-${index}`} className="text-center">
                             <p className="text-[10px] font-bold text-gray-400 uppercase">{party.name}</p>
                             <p className="text-sm font-black text-slate-800 dark:text-gray-100">
                                 {party.votes?.toLocaleString() || 0}
