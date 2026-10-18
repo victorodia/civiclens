@@ -221,5 +221,15 @@ async def get_election_config(db: _AsyncSession = _Depends(_get_db)):
         db.add(config)
         await db.commit()
         await db.refresh(config)
-    return {"party_a_name": config.party_a_name, "party_b_name": config.party_b_name, "party_c_name": config.party_c_name, "election_name": config.election_name}
+    # Coerce empty strings to defaults: the row exists on this deployment
+    # with blank names, and blank labels render as phantom layout columns in
+    # any legacy client still reading the global config.
+    def _d(value, fallback):
+        return value if value and value.strip() else fallback
+    return {
+        "party_a_name": _d(config.party_a_name, "Party A"),
+        "party_b_name": _d(config.party_b_name, "Party B"),
+        "party_c_name": _d(config.party_c_name, "Party C"),
+        "election_name": _d(config.election_name, "General Election"),
+    }
 
