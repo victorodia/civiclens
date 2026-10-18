@@ -155,6 +155,20 @@ async def login(
         from .models import AgentAssignment as _AA, Election as _EL
         _eids = [r[0] for r in (await db.execute(
             select(_AA.election_id).where(_AA.agent_id == user.id))).all()]
+        if not _eids:
+            # No accreditation at all: nothing to report, no reason to be in
+            # the app. Same handling as the not-live gate below.
+            _msg = "You are not accredited for any election. Contact your coordinator."
+            print(f"[AUTH] Agent login blocked (no assignment): {email}")
+            await log_audit(db, actor_id=str(user.id), actor_role="agent",
+                            action="LOGIN_ELECTION_NOT_LIVE",
+                            tenant_id=getattr(user, "client_id", None),
+                            target_type="user", target_id=str(user.id),
+                            details="Agent login blocked: no election assignment on record",
+                            ip_address=real_ip,
+                            device_fingerprint=device_fingerprint)
+            await db.commit()
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_msg)
         if _eids:
             _statuses = (await db.execute(
                 select(_EL.status).where(_EL.id.in_(_eids)))).scalars().all()
