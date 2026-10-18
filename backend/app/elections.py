@@ -331,6 +331,15 @@ async def create_election(
     if existing:
         raise HTTPException(409, f"Election code {code} already exists.")
 
+    # Party names must be distinct within a race: duplicates break result
+    # collation, confuse agents at submission, and previously stranded
+    # ghost labels on the dashboard tally.
+    party_names = [n.strip() for n in (payload.party_a_name, payload.party_b_name, payload.party_c_name)
+                   if n and n.strip()]
+    lowered = [n.lower() for n in party_names]
+    if len(lowered) != len(set(lowered)):
+        raise HTTPException(422, "Party names must be distinct within an election.")
+
     # Ownership: client admins can only ever create elections for their own
     # institution; platform admins pick a client (defaulting to internal).
     if user.client_id is not None:
