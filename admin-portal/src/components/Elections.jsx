@@ -208,11 +208,74 @@ function ScopeEditor({ election, onDone }) {
     );
 }
 
+function PartiesEditor({ election, onDone }) {
+    const { showNotification } = useNotification();
+    const [names, setNames] = useState({
+        party_a_name: election.party_a_name || '',
+        party_b_name: election.party_b_name || '',
+        party_c_name: election.party_c_name || '',
+    });
+    const [saving, setSaving] = useState(false);
+
+    const save = async () => {
+        const vals = [names.party_a_name.trim(), names.party_b_name.trim(), names.party_c_name.trim()];
+        if (vals.some(v => !v)) { showNotification('Party names cannot be blank.', 'warning'); return; }
+        if (new Set(vals.map(v => v.toLowerCase())).size !== 3) {
+            showNotification('Party names must be distinct.', 'warning'); return;
+        }
+        setSaving(true);
+        try {
+            const res = await fetch(`/admin/elections/${election.id}/parties`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    party_a_name: vals[0], party_b_name: vals[1], party_c_name: vals[2],
+                }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (res.ok) {
+                showNotification(`Parties for "${election.name}" updated.`, 'success');
+                onDone(true);
+            } else {
+                showNotification(data.detail || 'Update failed.', 'error');
+            }
+        } catch (e) {
+            showNotification('Network error.', 'error');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    return (
+        <div className="mt-3 bg-brand/5 dark:bg-brand/10 border border-brand/20 rounded-xl p-3 space-y-2">
+            <p className="text-[10px] font-black uppercase tracking-widest text-gray-500">Edit parties</p>
+            <div className="grid grid-cols-3 gap-2">
+                {['party_a_name', 'party_b_name', 'party_c_name'].map(k => (
+                    <input key={k} value={names[k]} onChange={e => setNames({ ...names, [k]: e.target.value })}
+                        className="w-full text-xs px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-transparent" />
+                ))}
+            </div>
+            <p className="text-[9px] text-gray-400">Votes already reported keep their column (A / B / C) — renaming relabels them.</p>
+            <div className="flex space-x-2">
+                <button onClick={save} disabled={saving}
+                    className="flex-1 bg-brand text-white py-2 rounded-lg text-[10px] font-black uppercase tracking-widest disabled:opacity-50">
+                    {saving ? 'Saving…' : 'Save parties'}
+                </button>
+                <button onClick={() => onDone(false)}
+                    className="px-3 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest text-gray-500 border border-gray-300 dark:border-gray-700">
+                    Cancel
+                </button>
+            </div>
+        </div>
+    );
+}
+
 const Elections = ({ setActiveView }) => {
     const { elections, refresh, setActiveElection } = useElection();
     const { showNotification, showDialog } = useNotification();
     const [showCreate, setShowCreate] = useState(false);
     const [scopeFor, setScopeFor] = useState(null);
+    const [editPartiesFor, setEditPartiesFor] = useState(null);
     const [form, setForm] = useState({ name: '', code: '', type: 'gubernatorial', party_a_name: '', party_b_name: '', party_c_name: '', client_id: '' });
     const [saving, setSaving] = useState(false);
 
@@ -432,6 +495,10 @@ const Elections = ({ setActiveView }) => {
 
                     <div className="flex flex-wrap items-center gap-x-4 gap-y-2 mt-3">
                         <button className="text-[10px] font-black uppercase tracking-widest text-brand"
+                            onClick={() => setEditPartiesFor(editPartiesFor === e.id ? null : e.id)}>
+                            {editPartiesFor === e.id ? 'Close party editor' : 'Edit parties'}
+                        </button>
+                        <button className="text-[10px] font-black uppercase tracking-widest text-brand"
                             onClick={() => setScopeFor(scopeFor === e.id ? null : e.id)}>
                             {scopeFor === e.id ? 'Close scope editor' : (e.pus ? 'Edit scope' : 'Set scope')}
                         </button>
@@ -471,6 +538,7 @@ const Elections = ({ setActiveView }) => {
                     )}
 
                     {scopeFor === e.id && <ScopeEditor election={e} onDone={() => { refresh(); setScopeFor(null); }} />}
+                    {editPartiesFor === e.id && <PartiesEditor election={e} onDone={(saved) => { setEditPartiesFor(null); if (saved) refresh(); }} />}
                 </div>
             ))}
         </motion.div>

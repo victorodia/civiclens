@@ -240,6 +240,12 @@ class ElectionStatusSchema(BaseModel):
     status: str
 
 
+class ElectionPartiesSchema(BaseModel):
+    party_a_name: str
+    party_b_name: str
+    party_c_name: str
+
+
 class ElectionScopeSchema(BaseModel):
     # Polling units are materialized from whole states and/or individual LGAs,
     # so a senatorial district (an arbitrary set of LGAs) scopes exactly like
@@ -403,6 +409,38 @@ async def set_election_status(
                     details=f"Status {election.code} -> {payload.status}")
     await db.commit()
     return {"status": "success", "election_id": election.id, "new_status": payload.status}
+
+
+@router.patch("/elections/{election_id}/parties")
+async def update_election_parties(
+    election_id: str,
+    payload: ElectionPartiesSchema,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(RequirePermission("provision_agents")),
+):
+    election = (await db.execute(select(Election).where(Election.id == election_id))).scalar_one_or_none()
+    if not election:
+        raise HTTPException(404, "Election not found.")
+    assert_in_scope(election.id, await client_scope_election_ids(db, user))
+
+    names = [payload.party_a_name.strip(), payload.party_b_name.strip(), payload.party_c_name.strip()]
+    if any(not n for n in names):
+        raise HTTPException(422, "Party names cannot be blank.")
+    lowered = [n.lower() for n in names]
+    if len(set(lowered)) != 3:
+        raise HTTPException(422, "Party names must be distinct within an election.")
+
+    old = f"{election.party_a_name} / {election.party_b_name} / {election.party_c_name}"
+    election.party_a_name, election.party_b_name, election.party_c_name = names
+    await log_audit(db, actor_id=str(user.id), actor_role=user.role,
+                    action="ELECTION_PARTIES_UPDATE",
+                    tenant_id=election.client_id,
+                    election_id=election.id,
+                    target_type="election", target_id=election.id,
+                    details=f"Parties changed from [{old}] to [{names[0]} / {names[1]} / {names[2]}]")
+    await db.commit()
+    await db.refresh(election)
+    return _election_to_dict(election, {})
 
 
 @router.post("/elections/{election_id}/scope")
