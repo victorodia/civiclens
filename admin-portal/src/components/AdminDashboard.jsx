@@ -65,6 +65,9 @@ const AdminDashboard = ({ setActiveView }) => {
             if (type === 'wards') url = `/admin/geo/lgas/${id}/wards`;
             if (type === 'pus') url = `/admin/geo/wards/${id}/pus`;
         }
+        // Geo filters follow the selected election's scope — the
+        // backend filters every level through election_polling_units.
+        if (selectedElectionId) url += `?election_id=${selectedElectionId}`;
         try {
             const res = await fetch(url);
             if (res.ok) return await res.json();
@@ -74,9 +77,16 @@ const AdminDashboard = ({ setActiveView }) => {
         return [];
     };
 
+    // Geo filters follow the selected election's scope: switching races
+    // clears the filter selection and reloads each level scoped to the
+    // election's materialized polling units.
     useEffect(() => {
-        fetchGeo('states').then(data => setGeoOptions(prev => ({ ...prev, states: data })));
-    }, []);
+        setFilters({ state: '', lga: '', ward: '', pu: '' });
+        setGeoOptions({ states: [], lgas: [], wards: [], pus: [] });
+        if (selectedElectionId) {
+            fetchGeo('states').then(data => setGeoOptions(prev => ({ ...prev, states: data })));
+        }
+    }, [selectedElectionId]);
 
     const handleFilterChange = (key, value) => {
         setFilters(prev => {
