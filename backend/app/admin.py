@@ -951,19 +951,32 @@ async def get_live_stats(
     lga_id: Optional[str] = None,
     ward_id: Optional[str] = None,
     pu_id: Optional[str] = None,
+    election_id: Optional[str] = None,
     db: AsyncSession = Depends(get_db), user = Depends(RequirePermission("view_results"))
 ):
     """Returns the rolling aggregate for the Situation Room charts with LIVE data, optionally filtered."""
     print(f"[TELEMETRY] Live Collation Request Received: state={state_id}, lga={lga_id}, ward={ward_id}, pu={pu_id}")
     from sqlalchemy import select, func
-    from .models import User, Result, PollingUnit, Ward, LGA, State
+    from .models import User, Result, PollingUnit, Ward, LGA, State, Election, AgentAssignment
     from .elections import client_scope_election_ids
+
+    # Optional per-election focus: the dashboard can scope every figure to a
+    # single race (and show that race's party names). Tenancy: a client admin
+    # probing another institution's election is told it does not exist.
+    focus_election = None
+    if election_id:
+        focus_election = (await db.execute(
+            select(Election).where(Election.id == election_id))).scalar_one_or_none()
+        if not focus_election or (user.client_id is not None and focus_election.client_id != user.client_id):
+            raise HTTPException(status_code=404, detail="Election not found")
 
     # Client tenancy: a client admin's aggregates cover only their own
     # institution's agents and elections. Platform admins (client_id NULL)
     # keep the cross-client view.
     scoped_ids = await client_scope_election_ids(db, user)
     def scope_result(stmt):
+        if focus_election is not None:
+            return stmt.where(Result.election_id == election_id)
         return stmt.where(Result.election_id.in_(scoped_ids)) if scoped_ids is not None else stmt
     def scope_agent(stmt):
         return stmt.where(User.client_id == user.client_id) if user.client_id is not None else stmt
@@ -978,6 +991,8 @@ async def get_live_stats(
         # Link result to PU if needed
         if table == Result:
             stmt = stmt.join(PollingUnit, Result.pu_id == PollingUnit.id)
+        elif table == AgentAssignment:
+            stmt = stmt.join(PollingUnit, AgentAssignment.pu_id == PollingUnit.id)
         elif table == User:
             stmt = stmt.join(PollingUnit, User.assigned_pu_id == PollingUnit.id)
             
@@ -992,10 +1007,16 @@ async def get_live_stats(
             
         return stmt
 
-    # 1. Agents Provisioned
-    agent_count_stmt = scope_agent(select(func.count(User.id)).where(User.role == "agent"))
+    # 1. Agents Provisioned — per-election focus counts accreditation rows;
+    # otherwise the client-wide (or platform-wide) agent roster.
+    if focus_election is not None:
+        agent_count_stmt = select(func.count(AgentAssignment.id)).where(
+            AgentAssignment.election_id == election_id)
+    else:
+        agent_count_stmt = scope_agent(select(func.count(User.id)).where(User.role == "agent"))
     if any([state_id, lga_id, ward_id, pu_id]):
-        agent_count_stmt = apply_filters(agent_count_stmt, User)
+        agent_count_stmt = apply_filters(
+            agent_count_stmt, AgentAssignment if focus_election is not None else User)
 
     agent_count_res = await db.execute(agent_count_stmt)
     agents_provisioned = agent_count_res.scalar() or 0
@@ -1041,7 +1062,7 @@ async def get_live_stats(
     flagged_res = await db.execute(flagged_stmt)
     flagged_count = flagged_res.scalar() or 0
 
-    return {
+    payload = {
         "total_votes": total_votes,
         "party_a": pa,
         "party_b": pb,
@@ -1050,6 +1071,17 @@ async def get_live_stats(
         "agents_provisioned": agents_provisioned,
         "flagged_count": flagged_count
     }
+    if focus_election is not None:
+        # The race's own party labels — the dashboard must never show the
+        # legacy global config's names for a specific election.
+        payload.update({
+            "election_name": focus_election.name,
+            "election_code": focus_election.code,
+            "party_a_name": focus_election.party_a_name,
+            "party_b_name": focus_election.party_b_name,
+            "party_c_name": focus_election.party_c_name,
+        })
+    return payload
 
 @router.get("/wallet-balance")
 async def get_wallet_balance(user: User = Depends(RequirePermission("view_live_telemetry"))):

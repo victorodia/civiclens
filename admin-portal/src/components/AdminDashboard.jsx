@@ -27,6 +27,20 @@ const AdminDashboard = ({ setActiveView }) => {
         party_c_name: 'Party C',
         election_name: 'General Election'
     });
+    // Multi-election world: the dashboard is scoped to ONE race at a time so
+    // votes are never summed across elections with different party slates.
+    const [elections, setElections] = useState([]);
+    const [selectedElectionId, setSelectedElectionId] = useState('');
+
+    const applyElectionPartyNames = (el) => {
+        if (!el) return;
+        setPartyConfig({
+            party_a_name: el.party_a_name,
+            party_b_name: el.party_b_name,
+            party_c_name: el.party_c_name,
+            election_name: el.name
+        });
+    };
     const [isLoading, setIsLoading] = useState(true);
 
     // Filtering State
@@ -103,11 +117,22 @@ const AdminDashboard = ({ setActiveView }) => {
             if (filters.lga) query.append('lga_id', filters.lga);
             if (filters.ward) query.append('ward_id', filters.ward);
             if (filters.pu) query.append('pu_id', filters.pu);
+            if (selectedElectionId) query.append('election_id', selectedElectionId);
 
             const response = await fetch(`/admin/stats/collation?${query.toString()}`);
             if (response.ok) {
                 const data = await response.json();
                 setStats(data);
+                // A focused stats response carries the race's own party
+                // labels — prefer them over any stale/global config.
+                if (data.party_a_name) {
+                    setPartyConfig({
+                        party_a_name: data.party_a_name,
+                        party_b_name: data.party_b_name,
+                        party_c_name: data.party_c_name,
+                        election_name: data.election_name || ''
+                    });
+                }
             }
         } catch (error) {
             showNotification("Dashboard Sync Failed. Retrying in background...", "warning");
@@ -139,6 +164,25 @@ const AdminDashboard = ({ setActiveView }) => {
         fetchPartyConfig();
     }, []);
 
+    // Load the elections this admin may see; auto-focus a single-election
+    // scope so party names and tallies are always race-specific.
+    useEffect(() => {
+        const loadElections = async () => {
+            try {
+                const res = await fetch('/admin/elections');
+                if (!res.ok) return;
+                const data = await res.json();
+                const list = data.elections || [];
+                setElections(list);
+                if (list.length === 1) {
+                    setSelectedElectionId(list[0].id);
+                    applyElectionPartyNames(list[0]);
+                }
+            } catch (e) { console.error(e); }
+        };
+        loadElections();
+    }, []);
+
     useEffect(() => {
         fetchStats();
         fetchHealth();
@@ -147,7 +191,7 @@ const AdminDashboard = ({ setActiveView }) => {
             fetchHealth();
         }, 30000);
         return () => clearInterval(interval);
-    }, [filters]);
+    }, [filters, selectedElectionId]);
 
     const chartData = [
         { name: partyConfig.party_a_name, votes: stats.party_a, color: '#0D9488' },
@@ -165,6 +209,22 @@ const AdminDashboard = ({ setActiveView }) => {
                     <Map className="w-5 h-5" />
                     <span className="text-xs font-black uppercase tracking-widest text-gray-400">Filters</span>
                 </div>
+
+                <select
+                    value={selectedElectionId}
+                    onChange={e => {
+                        setSelectedElectionId(e.target.value);
+                        applyElectionPartyNames(elections.find(x => x.id === e.target.value));
+                    }}
+                    className="bg-brand/5 dark:bg-brand/10 border border-brand/20 rounded-xl text-xs font-black p-2 focus:ring-2 focus:ring-brand text-brand"
+                >
+                    <option value="">All Elections (aggregate)</option>
+                    {elections.map(el => (
+                        <option key={el.id} value={el.id}>
+                            {el.name} ({el.code}){el.client_name ? ` — ${el.client_name}` : ''}
+                        </option>
+                    ))}
+                </select>
 
                 <select
                     value={filters.state}
