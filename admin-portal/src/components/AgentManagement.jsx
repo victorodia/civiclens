@@ -189,25 +189,32 @@ const AgentManagement = () => {
 
             if (data?.provisioned && data.provisioned[newAgentEmail]) {
                 const entry = data.provisioned[newAgentEmail];
-                // Server returns {temp_password, signing_key}; tolerate the old
-                // plain-string shape so a stale backend doesn't white-screen us.
-                const creds = typeof entry === 'string'
-                    ? { password: entry, signingKey: null }
-                    : { password: entry.temp_password, signingKey: entry.signing_key };
-                if (!creds.password) {
-                    throw new Error("Credentials issued, but password not returned by server.");
+                if (entry.error) {
+                    showNotification(`Provisioning failed: ${entry.error}`, "error");
+                } else if (entry.existing) {
+                    // Re-accreditation: assignment added (or already there);
+                    // NO new password — the agent keeps existing credentials.
+                    showNotification(
+                        entry.assigned
+                            ? `${newAgentEmail} already exists — added to ${entry.election_name || 'the election'}. They log in with their existing credentials.`
+                            : `${newAgentEmail} is already accredited for ${entry.election_name || 'this election'} — nothing to do.`,
+                        "success"
+                    );
+                    fetchAgents();
+                } else {
+                    // Server returns {temp_password, signing_key}; tolerate the old
+                    // plain-string shape so a stale backend doesn't white-screen us.
+                    const creds = typeof entry === 'string'
+                        ? { password: entry, signingKey: null }
+                        : { password: entry.temp_password, signingKey: entry.signing_key };
+                    if (!creds.password) {
+                        throw new Error("Credentials issued, but password not returned by server.");
+                    }
+                    setProvisionedCreds(creds);
+                    fetchAgents();
                 }
-                setProvisionedCreds(creds);
-
-                setAgents(prev => [...prev, {
-                    id: Date.now().toString(),
-                    name: 'New Agent',
-                    email: newAgentEmail,
-                    status: 'Pending Reset',
-                    device: 'Pending'
-                }]);
             } else {
-                throw new Error("Credentials issued, but password not returned by server.");
+                throw new Error("Provisioning returned no result for this email.");
             }
         } catch (err) {
             showNotification("Provisioning Error: " + err.message, "error");

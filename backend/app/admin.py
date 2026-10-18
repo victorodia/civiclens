@@ -186,11 +186,16 @@ async def provision_new_agents(payload: ProvisionSchema, db: AsyncSession = Depe
         existing_user = existing_res.scalar_one_or_none()
         if existing_user:
             # Tenancy: a client admin cannot pull another institution's
-            # agent into their election via the re-accreditation path.
-            if agent_client_id is not None and existing_user.client_id != agent_client_id:
+            # agent into their election. Platform admins may cross-accredit:
+            # one physical agent can serve several clients' same-day races
+            # at the same polling unit.
+            if (agent_client_id is not None and existing_user.client_id != agent_client_id
+                    and user.client_id is not None):
                 results[email] = {"error": "Agent belongs to another institution"}
                 continue
-            # Already a user: just (re)accredit for this election if asked
+            # Already a user: (re)accredit for this election if asked. No new
+            # password is issued — the agent keeps their existing credentials.
+            assigned = False
             if election:
                 clash = (await db.execute(select(AgentAssignment).where(
                     AgentAssignment.election_id == election.id,
@@ -206,6 +211,16 @@ async def provision_new_agents(payload: ProvisionSchema, db: AsyncSession = Depe
                 if not have:
                     db.add(AgentAssignment(agent_id=existing_user.id, election_id=election.id,
                                            pu_id=payload.polling_unit_id))
+                    assigned = True
+                    await log_audit(db, actor_id=str(user.id), actor_role=user.role,
+                                    action="AGENT_REACCREDITED",
+                                    tenant_id=election.client_id,
+                                    election_id=election.id,
+                                    target_type="user", target_id=existing_user.id,
+                                    details=f"Existing agent {email} accredited for {election.code}")
+            results[email] = {"existing": True, "assigned": assigned,
+                              "election_code": election.code if election else None,
+                              "election_name": election.name if election else None}
             continue
 
         temp_pwd = "CIVIC_" + ''.join(secrets.choice(alphabet) for _ in range(8))
