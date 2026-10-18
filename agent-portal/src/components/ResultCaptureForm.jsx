@@ -20,9 +20,13 @@ const ResultCaptureForm = ({ assignedPu, assignments }) => {
     // explicitly picks WHICH live election they are reporting for; every
     // later step (check-in, pings, signature, submission) is bound to that
     // election so a result can never cross between races.
-    const liveAssignments = (assignments || []).filter(a => a.election_status === 'live');
+    // Deliberately NOT filtered to 'live': an upcoming election is still
+    // this agent's assignment. The server accepts check-ins for it, and
+    // hiding it leaves the form unbound (no party names, Verify Entry that
+    // never disables).
+    const liveAssignments = assignments || [];
     const [pickedElectionId, setPickedElectionId] = useState(null);
-    // Auto-select when there is exactly one live assignment; otherwise wait
+    // Auto-select when there is exactly one assignment; otherwise wait
     // for an explicit pick (mismatch prevention beats convenience).
     const selected = liveAssignments.find(a => a.election_id === pickedElectionId)
         || (liveAssignments.length === 1 ? liveAssignments[0] : null);
@@ -35,10 +39,11 @@ const ResultCaptureForm = ({ assignedPu, assignments }) => {
     const [checkedInMap, setCheckedInMap] = useState({});
     const isCheckedIn = electionId
         ? !!(checkedInMap[electionId] || selected?.is_on_site)
-        : (assignedPu?.is_on_site || false);
+        : !!(checkedInMap.__legacy || assignedPu?.is_on_site || false);
 
     const markCheckedIn = () => {
         if (electionId) setCheckedInMap(prev => ({ ...prev, [electionId]: true }));
+        else setCheckedInMap(prev => ({ ...prev, __legacy: true }));
     };
 
     const [checkInLoading, setCheckInLoading] = useState(false);
@@ -461,7 +466,7 @@ const ResultCaptureForm = ({ assignedPu, assignments }) => {
                                     <p className="text-xs font-black uppercase tracking-tight text-gray-900 dark:text-white">
                                         {a.election_name}
                                     </p>
-                                    <p className="text-[9px] text-gray-400 font-mono">{a.election_code}</p>
+                                    <p className="text-[9px] text-gray-400 font-mono">{a.election_code} &middot; {a.election_status?.toUpperCase()}</p>
                                 </div>
                                 {selected?.election_id === a.election_id && (
                                     <CheckCircle className="w-4 h-4 text-brand" />
