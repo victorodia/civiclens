@@ -146,6 +146,34 @@ async def login(
             )
         print(f"[SECURITY] MFA Verified for user {user.email}")
 
+    # 3.55 Election-day gate for field agents: an agent whose accredited
+    # elections are ALL non-live has nothing to do in the app yet, so no
+    # token is issued. Placed after password + MFA verification (so nothing
+    # leaks before the password is proven) and exempts agents still awaiting
+    # their first password setup, so the bootstrap reset flow stays open.
+    if user.role == "agent" and not user.requires_password_reset:
+        from .models import AgentAssignment as _AA, Election as _EL
+        _eids = [r[0] for r in (await db.execute(
+            select(_AA.election_id).where(_AA.agent_id == user.id))).all()]
+        if _eids:
+            _statuses = (await db.execute(
+                select(_EL.status).where(_EL.id.in_(_eids)))).scalars().all()
+            if "live" not in _statuses:
+                _msg = ("The election is not live yet. You will be able to "
+                        "log in when voting begins." if "upcoming" in _statuses
+                        else "The election is closed. Submissions for your "
+                        "assignment are no longer open.")
+                print(f"[AUTH] Agent login blocked (no live election): {email} statuses={_statuses}")
+                await log_audit(db, actor_id=str(user.id), actor_role="agent",
+                                action="LOGIN_ELECTION_NOT_LIVE",
+                                tenant_id=getattr(user, "client_id", None),
+                                target_type="user", target_id=str(user.id),
+                                details=f"Agent login blocked: accredited election statuses={list(_statuses)}",
+                                ip_address=real_ip,
+                                device_fingerprint=device_fingerprint)
+                await db.commit()
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_msg)
+
     # 3.6 Successful authentication — chained audit row. Duress logins get
     # their own action name so the situation room can filter the silent
     # alarm without parsing details.
