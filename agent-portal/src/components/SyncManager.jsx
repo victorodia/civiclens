@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { RefreshCw, Check, CloudUpload, AlertTriangle, QrCode, X } from 'lucide-react';
 import { getPendingDrafts, deleteDraft, updateDraftStatus } from '../db/db';
 import QRScannerModal from './QRScannerModal';
@@ -10,6 +10,17 @@ const SyncManager = ({ assignedPu }) => {
     const [isScanOpen, setIsScanOpen] = useState(false);
     const [error, setError] = useState(null);
     const [isDismissed, setIsDismissed] = useState(false);
+
+    // Retry timer: transient rejections (election not open yet, network
+    // blips) must NOT stall the queue until another draft arrives.
+    const retryTimerRef = useRef(null);
+    const scheduleRetry = (ms = 60000) => {
+        if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = setTimeout(() => {
+            retryTimerRef.current = null;
+            handleSync();
+        }, ms);
+    };
 
     useEffect(() => {
         const updateOnlineStatus = () => setIsOnline(navigator.onLine);
@@ -24,6 +35,7 @@ const SyncManager = ({ assignedPu }) => {
             window.removeEventListener('online', updateOnlineStatus);
             window.removeEventListener('offline', updateOnlineStatus);
             clearInterval(interval);
+            if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
         };
     }, []);
 
@@ -157,6 +169,22 @@ const SyncManager = ({ assignedPu }) => {
                 if (!submitResponse.ok) {
                     const errorData = await submitResponse.json();
                     console.error("Submission failed:", errorData);
+                    if (submitResponse.status === 409) {
+                        // Temporal rejections. Election not open yet: keep the
+                        // draft queued and retry on a timer — the result must
+                        // sync the moment the election goes live. Duplicate
+                        // (WORM): the result is already on the server, so the
+                        // local copy is dropped.
+                        const detail = errorData.detail || '';
+                        if (detail.includes('[ELECTION_NOT_OPEN]')) {
+                            setError(`${detail.replace('[ELECTION_NOT_OPEN] ', '')} This result stays queued and will sync automatically when the election opens.`);
+                            scheduleRetry();
+                        } else {
+                            await deleteDraft(draft.id);
+                            setError(`PU ${draft.puCode}: ${detail} (local copy removed — result already collated)`);
+                        }
+                        continue;
+                    }
                     if (submitResponse.status === 401) {
                         // Token expired or revoked: force re-authentication on next sync
                         localStorage.removeItem('cl_access_token');
@@ -181,7 +209,9 @@ const SyncManager = ({ assignedPu }) => {
             } catch (err) {
                 console.error("Sync error for draft:", draft.id, err);
                 setError(`Sync failed: ${err.message}`);
-                // Break the loop on critical error to avoid spamming the server
+                // Break this cycle, but retry in a minute — a transient
+                // failure must not stall the whole queue until the next draft.
+                scheduleRetry();
                 break;
             }
         }

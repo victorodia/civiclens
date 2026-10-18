@@ -148,9 +148,12 @@ async def submit_election_result(
 
     if election.status != "live":
         print(f"[SECURITY] Submission rejected: election {election.code} is {election.status}")
+        # 409 (not 403): an upcoming/closed election is a TEMPORAL state,
+        # not an authorization failure. The agent app keeps these drafts
+        # queued and retries; a 403 would quarantine them forever.
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Submissions for {election.name} are closed (election is {election.status})."
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"[ELECTION_NOT_OPEN] Submissions for {election.name} are not open yet (election is {election.status})."
         )
 
     # 1. Signature Verification (Non-Repudiation + Cross-Election Binding).

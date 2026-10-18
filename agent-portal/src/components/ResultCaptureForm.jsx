@@ -411,7 +411,7 @@ const ResultCaptureForm = ({ assignedPu, assignments }) => {
                 <CheckCircle className="w-16 h-16 text-brand" />
                 <h2 className="text-2xl font-bold text-gray-800 dark:text-white">Result Captured!</h2>
                 <p className="text-gray-600 dark:text-gray-300">
-                    The result has been saved locally and will be synced to the server as soon as internet is available.
+                    The result is saved securely on this device. The sync banner at the bottom tracks upload progress — if the election is not open yet, it stays queued and syncs automatically once it opens.
                 </p>
 
                 <div className="flex flex-col w-full space-y-3 mt-4">
