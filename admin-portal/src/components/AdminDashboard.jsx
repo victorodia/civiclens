@@ -111,6 +111,9 @@ const AdminDashboard = ({ setActiveView }) => {
     };
 
     const fetchStats = async () => {
+        // No election focus, no stats: cross-election aggregates mix
+        // different party slates and mislead every client.
+        if (!selectedElectionId) return;
         try {
             const query = new URLSearchParams();
             if (filters.state) query.append('state_id', filters.state);
@@ -174,9 +177,10 @@ const AdminDashboard = ({ setActiveView }) => {
                 const data = await res.json();
                 const list = data.elections || [];
                 setElections(list);
-                if (list.length === 1) {
-                    setSelectedElectionId(list[0].id);
-                    applyElectionPartyNames(list[0]);
+                if (list.length > 0) {
+                    const preferred = list.find(e => e.status === 'live') || list[0];
+                    setSelectedElectionId(preferred.id);
+                    applyElectionPartyNames(preferred);
                 }
             } catch (e) { console.error(e); }
         };
@@ -210,21 +214,24 @@ const AdminDashboard = ({ setActiveView }) => {
                     <span className="text-xs font-black uppercase tracking-widest text-gray-400">Filters</span>
                 </div>
 
-                <select
-                    value={selectedElectionId}
-                    onChange={e => {
-                        setSelectedElectionId(e.target.value);
-                        applyElectionPartyNames(elections.find(x => x.id === e.target.value));
-                    }}
-                    className="bg-brand/5 dark:bg-brand/10 border border-brand/20 rounded-xl text-xs font-black p-2 focus:ring-2 focus:ring-brand text-brand"
-                >
-                    <option value="">All Elections (aggregate)</option>
-                    {elections.map(el => (
-                        <option key={el.id} value={el.id}>
-                            {el.name} ({el.code}){el.client_name ? ` — ${el.client_name}` : ''}
-                        </option>
-                    ))}
-                </select>
+                {elections.length > 0 ? (
+                    <select
+                        value={selectedElectionId}
+                        onChange={e => {
+                            setSelectedElectionId(e.target.value);
+                            applyElectionPartyNames(elections.find(x => x.id === e.target.value));
+                        }}
+                        className="bg-brand/5 dark:bg-brand/10 border border-brand/20 rounded-xl text-xs font-black p-2 focus:ring-2 focus:ring-brand text-brand"
+                    >
+                        {elections.map(el => (
+                            <option key={el.id} value={el.id}>
+                                {el.name} ({el.code}){el.client_name ? ` — ${el.client_name}` : ''}
+                            </option>
+                        ))}
+                    </select>
+                ) : (
+                    <span className="text-[10px] font-black uppercase text-gray-400">No elections configured</span>
+                )}
 
                 <select
                     value={filters.state}
